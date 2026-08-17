@@ -1,0 +1,379 @@
+"""The octopus: five specialist roles, grown into as many parallel agents as a task needs.
+
+A role is a template — a system prompt, a temperature, and a model preference list. It is
+not an agent and it is not a limit. One dispatch can run six coders on six files and two
+analysts on two datasets; the planner decides how many, and the supervisor adds more once
+it sees what came back. `octopus.dispatch()` owns that lifecycle.
+
+
+Nothing here hardcodes a model. `bind()` takes the catalog from your key plus the set of
+models that were proven to answer, and walks each tentacle's preference list until it
+finds one of those — so the same code works on a key with 102 models and a key with three.
+
+Being listed is not the same as being served: most catalogued models 404, and some accept
+a request and never reply. That is why `bind()` wants a verified set rather than trusting
+the catalog; `octopus.catalog()` produces it.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+# --- catalog classification -------------------------------------------------
+# Ordered: the first pattern that matches an ID wins, so 'coder' beats generic 'chat'.
+
+FAMILY_PATTERNS: list[tuple[str, str]] = [
+    ("image", r"stable-diffusion|sdxl|flux|sana|consistory|kandinsky|image|shuttle"),
+    ("embedding", r"embed|embedqa|nv-embed"),
+    ("rerank", r"rerank"),
+    ("vision", r"vila|neva|llava|kosmos|vision|maverick|scout|vlm|ocdr|florence"),
+    ("code", r"coder|codestral|codegemma|starcoder|codellama|code-"),
+    ("reasoning", r"deepseek-r1|nemotron|qwq|magistral|reasoning|thinker|phi-4-reasoning"),
+    ("speech", r"whisper|parakeet|riva|tts|asr|canary"),
+    ("chat", r".*"),
+]
+
+
+# Models that answer /chat/completions but are not general-purpose assistants: safety
+# classifiers, reward models, retrievers, OCR/parse and translation heads. They look like
+# 'chat' to the patterns above, so a fallback would happily bind one and get back a
+# one-word verdict instead of an answer. Never auto-bind these.
+UTILITY_PATTERN = re.compile(
+    r"guard|safety|content-safety|topic-control|reward|embed|rerank|retriev|"
+    r"parse|deplot|nvclip|translate|detector|calibration"
+)
+
+
+def family_of(model_id: str) -> str:
+    lowered = model_id.lower()
+    for family, pattern in FAMILY_PATTERNS:
+        if re.search(pattern, lowered):
+            return family
+    return "chat"
+
+
+def is_utility(model_id: str) -> bool:
+    """True for classifiers and other single-purpose heads that must not act as agents."""
+    return bool(UTILITY_PATTERN.search(model_id.lower()))
+
+
+def classify(model_ids: list[str]) -> dict[str, list[str]]:
+    """Group every model your key can reach into families."""
+    grouped: dict[str, list[str]] = {}
+    for mid in sorted(model_ids):
+        grouped.setdefault(family_of(mid), []).append(mid)
+    return grouped
+
+
+# --- tentacles --------------------------------------------------------------
+
+
+@dataclass
+class Tentacle:
+    id: str
+    name: str
+    color: str
+    blurb: str
+    keywords: list[str]
+    candidates: list[str]          # substrings, best first
+    fallback_families: list[str]   # if no candidate matches, take the first model from these
+    system: str
+    temperature: float = 0.4
+    max_tokens: int = 1400
+    kind: str = "chat"             # 'chat' or 'image'
+
+
+TENTACLES: list[Tentacle] = [
+    Tentacle(
+        id="writer",
+        name="Writer",
+        color="#f2b56b",
+        blurb="Drafts, edits, and rewrites prose",
+        keywords=["write", "draft", "email", "blog", "post", "summar", "rewrite", "edit",
+                  "essay", "copy", "story", "letter", "announce", "release note"],
+        candidates=["palmyra-creative", "gpt-oss-120b", "nemotron-3-super", "step-3.7",
+                    "muse-glimmer", "inkling", "kimi-k2", "glm-5", "llama-3.3-70b",
+                    "llama-3.1-405b", "llama-3.1-70b", "mixtral-8x22b", "nemotron-4-340b",
+                    "qwen2.5-72b", "llama-3.1-8b"],
+        fallback_families=["chat", "reasoning"],
+        system=("You are a writing specialist. Produce finished prose, not an outline of prose. "
+                "Match the register the request implies. No preamble, no 'here is'; open with the "
+                "work itself. Use Markdown only where structure genuinely helps."),
+        temperature=0.7,
+    ),
+    Tentacle(
+        id="coder",
+        name="Coder",
+        color="#5fd8d1",
+        blurb="Writes, reviews, and debugs code",
+        keywords=["code", "function", "bug", "refactor", "api", "script", "sql", "regex",
+                  "python", "java", "react", "test", "deploy", "jenkins", "pipeline", "error",
+                  "stack trace", "class", "endpoint"],
+        candidates=["qwen3-coder", "qwen2.5-coder-32b", "codestral", "deepseek-coder",
+                    "laguna", "codellama-70b", "granite-34b-code", "starcoder2",
+                    "gpt-oss-120b", "nemotron-3-super", "deepseek-r1", "llama-3.3-70b"],
+        fallback_families=["code", "reasoning", "chat"],
+        system=("You are a software engineer. Give working code first, then a short note on the "
+                "non-obvious parts only. Always name the language in the fence. State assumptions "
+                "about versions or environment explicitly rather than guessing silently."),
+        temperature=0.15,
+        max_tokens=2000,
+    ),
+    Tentacle(
+        id="scheduler",
+        name="Scheduler",
+        color="#a98cff",
+        blurb="Turns intent into a dated, sequenced plan",
+        keywords=["schedule", "plan", "calendar", "sprint", "deadline", "timeline", "roadmap",
+                  "meeting", "milestone", "agenda", "when", "sequence", "release", "cutover"],
+        # Strict JSON out, so plain instruction-following models beat reasoning models
+        # here — the latter wrap their answer in <think> and break the parse.
+        candidates=["llama-3.1-8b", "gpt-oss-20b", "step-3.7-flash", "llama-3.3-70b",
+                    "llama-3.1-70b", "mistral-large", "nemotron-3.5-lightning",
+                    "nemotron-mini"],
+        fallback_families=["chat", "reasoning"],
+        system=("You are a planning specialist. Respond with ONLY a JSON object, no prose and no "
+                "Markdown fences, shaped: "
+                '{"title": str, "assumptions": [str], "items": [{"when": str, "what": str, '
+                '"duration": str, "depends_on": str|null, "owner": str|null}]}. '
+                "Use relative dates ('Day 1', 'Week 2') unless the request gives real ones. "
+                "Put anything you had to guess in assumptions."),
+        temperature=0.2,
+    ),
+    Tentacle(
+        id="imager",
+        name="Imager",
+        color="#ff8a7a",
+        blurb="Generates images, or writes the prompt if no image model is entitled",
+        keywords=["image", "picture", "logo", "illustration", "diagram", "poster", "banner",
+                  "photo", "render", "visual", "icon", "thumbnail", "mockup", "art"],
+        candidates=["flux.1-dev", "flux", "stable-diffusion-3-5-large", "stable-diffusion-3",
+                    "sdxl", "sana", "shuttle", "consistory", "stable-diffusion"],
+        fallback_families=["image"],
+        # Only reached when no image model is entitled — an entitled one goes straight to
+        # the genai endpoint and never sees a system prompt.
+        system=("You are an art director. The account has no image model entitled, so instead of "
+                "an image, deliver a production-ready generation prompt: subject, composition, "
+                "lighting, palette, lens or medium, and a negative prompt. Then name two models "
+                "on build.nvidia.com that would suit it."),
+        temperature=0.8,
+        kind="image",
+    ),
+    Tentacle(
+        id="analyst",
+        name="Analyst",
+        color="#9fe86a",
+        blurb="Reasons over data, compares options, finds the flaw",
+        keywords=["analy", "compare", "evaluate", "why", "risk", "trade-off", "tradeoff", "data",
+                  "metric", "root cause", "assess", "review", "pros and cons", "decide",
+                  "estimate", "forecast", "investigate"],
+        candidates=["nemotron-3-ultra", "deepseek-r1", "qwq-32b", "nemotron-ultra",
+                    "llama-3.3-nemotron-super-49b", "gpt-oss-120b", "nemotron-3-super",
+                    "nemotron-70b", "magistral", "llama-3.3-70b"],
+        fallback_families=["reasoning", "chat"],
+        system=("You are an analyst. Lead with the conclusion, then the reasoning that supports it. "
+                "Quantify where the input allows and say plainly where it does not. Name the "
+                "strongest objection to your own conclusion before you finish."),
+        temperature=0.3,
+        max_tokens=1800,
+    ),
+]
+
+BY_ID = {t.id: t for t in TENTACLES}
+
+# Every model name any tentacle asks for, in order. Used to rank generic fallbacks: a
+# curated name beats whatever happens to sort first alphabetically.
+CURATED: list[str] = [c for t in TENTACLES for c in t.candidates]
+
+
+def curation_rank(model_id: str) -> int:
+    lowered = model_id.lower()
+    return next((i for i, c in enumerate(CURATED) if c in lowered), len(CURATED))
+
+
+def shortlist(t: Tentacle, model_ids: list[str], limit: int = 8) -> list[tuple[str, str]]:
+    """Every model this tentacle would accept, best first, as (model_id, how) pairs.
+
+    Preferred candidates come first, then whatever the fallback families offer. Callers
+    walk this in order and take the first model that proves it is actually serving.
+    """
+    grouped = classify(model_ids)
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+
+    def add(mid: str, how: str) -> None:
+        if mid and mid not in seen:
+            seen.add(mid)
+            out.append((mid, how))
+
+    for candidate in t.candidates:
+        # Shortest match wins: 'llama-3.1-8b' should prefer the plain instruct model over
+        # any longer derivative that happens to embed the same substring.
+        for mid in sorted((m for m in model_ids if candidate in m.lower()), key=len):
+            add(mid, "preferred")
+
+    def ranked(family: str) -> list[str]:
+        # Curated names first, then alphabetical. Family lists arrive alphabetical, and
+        # since the shortlist is capped, an unranked tail would spend the whole budget on
+        # whatever sorts early rather than on models we actually want.
+        return sorted((m for m in grouped.get(family, []) if not is_utility(m)),
+                      key=lambda m: (curation_rank(m), m))
+
+    for fam in t.fallback_families:
+        for mid in ranked(fam):
+            add(mid, f"fallback from {fam}")
+
+    # An imager with no image model still works — it writes prompts instead.
+    if t.kind == "image":
+        for mid in ranked("chat"):
+            add(mid, "no image model entitled — writing prompts instead")
+
+    return out[:limit]
+
+
+def bind(model_ids: list[str], live: set[str] | None = None) -> list[dict]:
+    """Attach a model to every tentacle. Returns a report of what got bound and how.
+
+    `live` is the set of models confirmed to actually answer. Pass it whenever you can:
+    the catalog happily lists models that 404, and worse, models that accept a request
+    and never reply. Without it this falls back to trusting the catalog.
+    """
+    report = []
+    grouped = classify(model_ids)
+    for t in TENTACLES:
+        chosen, how = None, "nothing entitled"
+        for mid, why in shortlist(t, model_ids):
+            if live is None or mid in live:
+                chosen, how = mid, why
+                break
+        if chosen and live is not None and how == "preferred":
+            how = "preferred, verified"
+
+        # The shortlist is capped, and its fallback tail is alphabetical rather than
+        # ranked — so a tentacle can run out of options while perfectly good models sit
+        # in the verified set. Draw on that directly before giving up.
+        if not chosen and live:
+            families = t.fallback_families + (["chat", "reasoning"] if t.kind == "image" else [])
+            for fam in families:
+                pool = sorted((m for m in grouped.get(fam, []) if m in live and not is_utility(m)),
+                              key=lambda m: (curation_rank(m), m))
+                if pool:
+                    chosen, how = pool[0], f"any working {fam} model"
+                    break
+        report.append({
+            "id": t.id, "name": t.name, "color": t.color, "blurb": t.blurb,
+            "model": chosen, "bound_via": how, "kind": t.kind,
+            "ready": chosen is not None,
+            "generates_images": t.kind == "image" and chosen is not None
+                                and family_of(chosen) == "image",
+        })
+    return report
+
+
+# --- planning ---------------------------------------------------------------
+
+ROLE_MENU = ("writer (prose), coder (code), scheduler (dated plans), "
+             "imager (visuals), analyst (reasoning and analysis)")
+
+SCHEMA = ('{"agents": [{"role": str, "label": str, "subtask": str}], "why": str}')
+
+ROLE_RULE = ('"role" must be exactly one of these five strings: "writer", "coder", '
+             '"scheduler", "imager", "analyst". Never invent another role name; pick the '
+             'closest of the five. Anything reasoned out or worked out is "analyst".')
+
+
+def planner_system(budget: int) -> str:
+    """Decompose a task into as many parallel agents as it genuinely warrants."""
+    return (
+        f"You decompose a task into independent work items for specialist agents that all "
+        f"run at the same time. Roles: {ROLE_MENU}. "
+        f"Respond with ONLY JSON, no prose and no Markdown fences, shaped: {SCHEMA}. "
+        f"{ROLE_RULE} "
+        f"Create one agent per genuinely separable piece of work — as many as the task "
+        f"needs, up to {budget}. Reuse a role as often as you like: three coders on three "
+        f"different modules is correct and expected. "
+        f"Size the pool by counting the distinct deliverables the task actually asks for, "
+        f"and create exactly that many agents. 'What is 12 percent of 340?' asks for one "
+        f"answer — that is one agent, not three. 'Assess the risks, write the migration "
+        f"code, plan the cutover and draft the announcement' asks for four things — that "
+        f"is four agents. Never split one deliverable into think/do/present stages: a "
+        f"single agent produces its whole piece by itself. Always return at least one. "
+        f"'label' is two to four words naming that agent's slice, "
+        f"unique across agents. Each 'subtask' must stand alone and carry its own context — "
+        f"an agent sees only its own subtask, never the task or the other agents. Never "
+        f"create an agent whose work needs another agent's output first; they are "
+        f"concurrent, not sequential."
+    )
+
+
+def supervisor_system(budget: int) -> str:
+    """Decide, having seen the first results, whether the task needs more agents."""
+    return (
+        f"You supervise a pool of parallel agents working one task. You are given the task "
+        f"and a digest of what has been produced so far. Decide whether more agents are "
+        f"needed: gaps left open, pieces the finished work revealed, depth the task asks "
+        f"for and has not got. Roles: {ROLE_MENU}. "
+        f"Respond with ONLY JSON, no prose and no Markdown fences, shaped: {SCHEMA}. "
+        f"{ROLE_RULE} "
+        f"Digest entries are excerpts: one ending in '[EXCERPT ENDS]' was cut for length "
+        f"and its agent finished in full. Never treat a truncated entry as unfinished work. "
+        f"Only an entry explicitly marked FAILED did not complete. "
+        f"Apply this test first: if every entry in the digest has real content and none is "
+        f'marked FAILED, the task is covered — answer {{"agents": [], "why": "covered"}} '
+        f"and nothing else. Add an agent only for a distinct part of the original task that "
+        f"no entry addresses at all, or to redo an entry marked FAILED. Never add an agent "
+        f"to verify, check, recompute, review, polish or summarise another agent's answer, "
+        f"and never add one merely because budget remains. Up to {budget} agents. "
+        f"Each subtask must stand alone; the new agents run concurrently and cannot see "
+        f"each other."
+    )
+
+
+# Planning is the one call whose quality sets the shape of everything after it, so it gets
+# the strongest model available rather than the cheapest. Small models answer fast and size
+# the pool badly — they split a two-part task into eight. Ordered best first; anything here
+# must emit strict JSON, which rules out models that narrate their reasoning first.
+PLANNER_PREFERENCE = [
+    "nemotron-3-super", "gpt-oss-120b", "llama-3.3-70b", "mistral-large",
+    "nemotron-3.5-lightning", "step-3.7-flash", "gpt-oss-20b", "nemotron-3-ultra",
+    "llama-3.1-70b", "llama-3.1-8b",
+]
+
+
+def pick_planner(live: set[str]) -> str | None:
+    """Best available model for planning and supervision, or None if nothing is usable."""
+    for pref in PLANNER_PREFERENCE:
+        matches = sorted((m for m in live if pref in m.lower()), key=len)
+        if matches:
+            return matches[0]
+    return next((m for m in sorted(live) if not is_utility(m)), None)
+
+
+def role_for_text(text: str) -> str:
+    """Best-matching role for free text.
+
+    Planners cheerfully invent roles that are not on the menu ('calculator', 'researcher').
+    Dropping those agents loses real work, so an invented role gets mapped onto the closest
+    real one by keyword instead. Analyst is the default: it is the most general of the five.
+    """
+    lowered = text.lower()
+    best_score, best_id = 0, "analyst"
+    for t in TENTACLES:
+        score = sum(1 for k in t.keywords if k in lowered)
+        if score > best_score:
+            best_score, best_id = score, t.id
+    return best_id
+
+
+def keyword_plan(task: str, budget: int) -> list[dict]:
+    """Deterministic fallback when the planner model is unavailable or returns junk.
+
+    Scales with the task the only way keywords can: every role the text actually implicates
+    gets an agent, rather than a fixed top-two.
+    """
+    lowered = task.lower()
+    scored = [(sum(1 for k in t.keywords if k in lowered), t) for t in TENTACLES]
+    picked = [t for score, t in sorted(scored, key=lambda s: -s[0]) if score > 0][:budget]
+    return [{"role": t.id, "label": t.name.lower(), "subtask": task}
+            for t in (picked or [BY_ID["writer"]])]

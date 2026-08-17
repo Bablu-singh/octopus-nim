@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NIM Test Layer</title>
+<style>
+  :root{
+    --ink:#0a1020; --panel:#111a2e; --line:#22304d; --line-soft:#1a2540;
+    --text:#dfe6f5; --muted:#7f8fb0; --signal:#5b8cff; --pass:#3fd68c; --fail:#ff6b6b; --warn:#ffc86b;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);
+       font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:32px 20px 80px}
+
+  header{display:flex;flex-wrap:wrap;gap:16px;align-items:baseline;justify-content:space-between;
+         border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:28px}
+  h1{font-family:var(--mono);font-size:19px;font-weight:600;letter-spacing:-.02em;margin:0}
+  h1 span{color:var(--signal)}
+  .endpoint{font-family:var(--mono);font-size:12px;color:var(--muted)}
+
+  .panel{background:var(--panel);border:1px solid var(--line-soft);border-radius:10px;
+         padding:20px;margin-bottom:20px}
+  .panel h2{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.14em;
+            text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+
+  label{display:block;font-size:12px;color:var(--muted);margin:0 0 6px}
+  input,select,textarea,button{font-family:inherit;font-size:14px}
+  input,select,textarea{width:100%;background:#0c1424;color:var(--text);
+    border:1px solid var(--line);border-radius:7px;padding:10px 12px}
+  textarea{min-height:96px;resize:vertical;font-family:var(--mono);font-size:13px;line-height:1.6}
+  input:focus,select:focus,textarea:focus{outline:2px solid var(--signal);outline-offset:1px;border-color:transparent}
+  .row{display:grid;gap:14px;grid-template-columns:1fr 1fr;margin-bottom:14px}
+  .row.three{grid-template-columns:2fr 1fr 1fr}
+  @media(max-width:640px){.row,.row.three{grid-template-columns:1fr}}
+
+  button{background:var(--signal);color:#06101f;border:0;border-radius:7px;padding:10px 18px;
+         font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button:focus-visible{outline:2px solid var(--text);outline-offset:2px}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
+  /* signature: bench-instrument check strip */
+  .strip{display:flex;flex-direction:column;gap:1px;background:var(--line-soft);
+         border-radius:7px;overflow:hidden}
+  .check{display:grid;grid-template-columns:14px 1fr auto;gap:14px;align-items:center;
+         background:#0c1424;padding:13px 16px}
+  .lamp{width:9px;height:9px;border-radius:50%;background:var(--line);
+        box-shadow:0 0 0 3px rgba(255,255,255,.03)}
+  .check.pass .lamp{background:var(--pass);box-shadow:0 0 10px rgba(63,214,140,.5)}
+  .check.fail .lamp{background:var(--fail);box-shadow:0 0 10px rgba(255,107,107,.5)}
+  .check.run .lamp{background:var(--warn);animation:pulse 1s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.25}}
+  .check .name{font-weight:500}
+  .check .note{display:block;font-family:var(--mono);font-size:12px;color:var(--muted);
+               margin-top:3px;word-break:break-word}
+  .check .ms{font-family:var(--mono);font-size:12px;color:var(--muted);white-space:nowrap}
+  @media(prefers-reduced-motion:reduce){.check.run .lamp{animation:none}}
+
+  pre{background:#0c1424;border:1px solid var(--line-soft);border-radius:7px;padding:16px;
+      font-family:var(--mono);font-size:13px;line-height:1.65;white-space:pre-wrap;
+      word-break:break-word;margin:0;min-height:64px;max-height:420px;overflow:auto}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:10px}
+  .meta b{color:var(--text);font-weight:500}
+  .err{color:var(--fail)}
+  .hint{font-size:12px;color:var(--muted);margin:10px 0 0}
+  datalist{color:#000}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>NIM test layer <span>/</span> build.nvidia.com</h1>
+    <div class="endpoint" id="endpoint">checking key…</div>
+  </header>
+
+  <section class="panel">
+    <h2>Key</h2>
+    <div class="row">
+      <div>
+        <label for="key">Runtime key (optional — leave blank to use .env)</label>
+        <input id="key" type="password" placeholder="nvapi-…" autocomplete="off" spellcheck="false">
+      </div>
+      <div>
+        <label for="model">Model</label>
+        <input id="model" list="models" value="meta/llama-3.1-8b-instruct" spellcheck="false">
+        <datalist id="models"></datalist>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="run-selftest">Run self-test</button>
+      <button class="ghost" id="load-models">Load models</button>
+    </div>
+    <p class="hint">A key typed here is held in this tab only and sent to your local service — it is never stored.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Self-test</h2>
+    <div class="strip" id="strip">
+      <div class="check"><span class="lamp"></span><span class="name">Key loaded<span class="note">not run yet</span></span><span class="ms"></span></div>
+      <div class="check"><span class="lamp"></span><span class="name">Key authenticates<span class="note">not run yet</span></span><span class="ms"></span></div>
+      <div class="check"><span class="lamp"></span><span class="name">Completion round trip<span class="note">not run yet</span></span><span class="ms"></span></div>
+      <div class="check"><span class="lamp"></span><span class="name">Streaming<span class="note">not run yet</span></span><span class="ms"></span></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Send a prompt</h2>
+    <div class="row three">
+      <div>
+        <label for="system">System message</label>
+        <input id="system" placeholder="optional">
+      </div>
+      <div>
+        <label for="temp">Temperature</label>
+        <input id="temp" type="number" min="0" max="2" step="0.1" value="0.2">
+      </div>
+      <div>
+        <label for="tokens">Max tokens</label>
+        <input id="tokens" type="number" min="1" max="8192" value="512">
+      </div>
+    </div>
+    <label for="prompt">Prompt</label>
+    <textarea id="prompt">Explain what a NIM microservice is in two sentences.</textarea>
+    <div class="actions" style="margin-top:14px">
+      <button id="send">Send</button>
+      <button class="ghost" id="send-stream">Stream</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Response</h2>
+    <pre id="out">—</pre>
+    <div class="meta" id="meta"></div>
+  </section>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const headers = () => {
+  const h = {"Content-Type": "application/json"};
+  const k = $("key").value.trim();
+  if (k) h["X-NIM-Key"] = k;
+  return h;
+};
+const body = () => JSON.stringify({
+  prompt: $("prompt").value,
+  model: $("model").value.trim(),
+  system: $("system").value.trim() || null,
+  temperature: parseFloat($("temp").value),
+  max_tokens: parseInt($("tokens").value, 10)
+});
+
+const API = location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+
+// Returns parsed JSON, or throws an Error whose message says what actually went wrong.
+async function call(path, opts = {}) {
+  let r;
+  try {
+    r = await fetch(API + path, opts);
+  } catch (netErr) {
+    if (location.protocol === "file:")
+      throw new Error(`Page opened from the filesystem, and ${API} did not answer. ` +
+                      `Open http://127.0.0.1:8000 instead of the .html file.`);
+    throw new Error(`No answer from ${location.origin}${path} — the service is not listening on this port.`);
+  }
+  const raw = await r.text();
+  let d;
+  try { d = JSON.parse(raw); }
+  catch { throw new Error(`HTTP ${r.status} from ${path}, not JSON. Server said: ${raw.slice(0, 300)}`); }
+  if (!r.ok) throw new Error(d.detail || `HTTP ${r.status} from ${path}`);
+  return d;
+}
+
+async function health() {
+  let d;
+  try { d = await call("/api/health", {headers: headers()}); }
+  catch (err) { $("endpoint").textContent = err.message; $("endpoint").className = "endpoint err"; return; }
+  $("endpoint").textContent = d.ok
+    ? `${d.fingerprint} · from ${d.source} · ${d.base_url}`
+    : d.detail;
+  $("endpoint").className = "endpoint" + (d.ok ? "" : " err");
+}
+
+function paint(i, state, note, ms) {
+  const el = $("strip").children[i];
+  el.className = "check " + state;
+  el.querySelector(".note").textContent = note;
+  el.querySelector(".ms").textContent = ms == null ? "" : ms + " ms";
+}
+
+$("run-selftest").onclick = async e => {
+  e.target.disabled = true;
+  [...$("strip").children].forEach((_, i) => paint(i, "run", "running…", null));
+  try {
+    const d = await call("/api/selftest", {method: "POST", headers: headers()});
+    [...$("strip").children].forEach((_, i) => {
+      const c = d.checks[i];
+      if (c) paint(i, c.ok ? "pass" : "fail", c.note, c.latency_ms);
+      else paint(i, "", "skipped — an earlier check failed", null);
+    });
+  } catch (err) {
+    paint(0, "fail", err.message, null);
+    [1, 2, 3].forEach(i => paint(i, "", "not reached", null));
+  }
+  e.target.disabled = false;
+  health();
+};
+
+$("load-models").onclick = async e => {
+  e.target.disabled = true;
+  try {
+    const d = await call("/api/models", {headers: headers()});
+    $("models").innerHTML = d.models.map(m => `<option value="${m}">`).join("");
+    $("out").textContent = d.models.join("\n");
+    $("meta").innerHTML = `<b>${d.count}</b> models · <b>${d.latency_ms}</b> ms`;
+  } catch (err) {
+    $("out").innerHTML = '<span class="err">' + err.message + "</span>";
+  }
+  e.target.disabled = false;
+};
+
+$("send").onclick = async e => {
+  e.target.disabled = true;
+  $("out").textContent = "waiting…"; $("meta").textContent = "";
+  try {
+    const d = await call("/api/chat", {method: "POST", headers: headers(), body: body()});
+    $("out").textContent = d.text;
+    const u = d.usage || {};
+    $("meta").innerHTML = `<b>${d.model}</b> · <b>${d.latency_ms}</b> ms · ` +
+      `${u.prompt_tokens ?? "?"} in / ${u.completion_tokens ?? "?"} out · ${d.finish_reason ?? "—"}`;
+  } catch (err) {
+    $("out").innerHTML = '<span class="err">' + err.message + "</span>";
+  }
+  e.target.disabled = false;
+};
+
+$("send-stream").onclick = async e => {
+  e.target.disabled = true;
+  $("out").textContent = ""; $("meta").textContent = "";
+  const t0 = performance.now();
+  let first = null, chunks = 0;
+  const r = await fetch(API + "/api/chat/stream", {method: "POST", headers: headers(), body: body()});
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {stream: true});
+    const lines = buf.split("\n"); buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") continue;
+      try {
+        const j = JSON.parse(payload);
+        if (j.error) { $("out").innerHTML = '<span class="err">' + j.error + "</span>"; continue; }
+        const piece = j.choices?.[0]?.delta?.content || "";
+        if (piece) {
+          if (first === null) first = Math.round(performance.now() - t0);
+          chunks++;
+          $("out").textContent += piece;
+        }
+      } catch (_) {}
+    }
+  }
+  $("meta").innerHTML = `<b>${chunks}</b> chunks · first token <b>${first ?? "—"}</b> ms · ` +
+    `total <b>${Math.round(performance.now() - t0)}</b> ms`;
+  e.target.disabled = false;
+};
+
+health();
+</script>
+</body>
+</html>

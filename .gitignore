@@ -1,0 +1,19 @@
+# Secrets — never commit. The NVIDIA key lives in nim-test-layer/.env only.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Local editor/tooling state
+.claude/

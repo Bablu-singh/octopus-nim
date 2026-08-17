@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Octopus · multi-agent NIM console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --abyss:#04141d; --deep:#0a2430; --ridge:#123c4e; --edge:#1b5064;
+    --text:#dcf0f4; --muted:#6f95a3; --glow:#7ff2e0;
+    --writer:#f2b56b; --coder:#5fd8d1; --scheduler:#a98cff; --imager:#ff8a7a; --analyst:#9fe86a;
+    --display:"Space Grotesk",system-ui,sans-serif;
+    --body:"Inter",system-ui,-apple-system,sans-serif;
+    --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:
+      radial-gradient(1300px 700px at 50% -12%, #0e3546 0%, transparent 62%),
+      radial-gradient(900px 500px at 12% 105%, #0b2f3e 0%, transparent 60%),
+      var(--abyss);
+    color:var(--text);font-family:var(--body);font-size:15px;line-height:1.55;
+    -webkit-font-smoothing:antialiased;min-height:100vh;overflow-x:hidden}
+
+  /* drifting motes, purely atmospheric */
+  .motes{position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.5}
+  .mote{position:absolute;border-radius:50%;background:var(--glow);filter:blur(1px);
+        animation:drift linear infinite}
+  @keyframes drift{
+    0%{transform:translateY(20vh) translateX(0);opacity:0}
+    10%{opacity:.5} 90%{opacity:.4}
+    100%{transform:translateY(-110vh) translateX(28px);opacity:0}}
+
+  .wrap{max-width:1120px;margin:0 auto;padding:28px 20px 90px;position:relative;z-index:1}
+
+  header{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:baseline;
+         justify-content:space-between;margin-bottom:18px}
+  .brand{font-family:var(--display);font-weight:700;font-size:22px;letter-spacing:-.02em;margin:0}
+  .brand em{font-style:normal;color:var(--glow);text-shadow:0 0 18px #7ff2e066}
+  .stat{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .stat a{color:var(--muted)}
+
+  /* ---- live counters ---- */
+  .hud{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 6px}
+  .pill{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--muted);background:#08202880;border:1px solid var(--ridge);
+    border-radius:20px;padding:5px 12px;transition:color .3s,border-color .3s}
+  .pill b{color:var(--glow);font-weight:500;font-variant-numeric:tabular-nums}
+  .pill.hot{border-color:var(--glow);color:var(--text)}
+
+  /* ---- the octopus ---- */
+  .creature{position:relative;margin:0 auto 4px;max-width:660px}
+  svg.oct{width:100%;height:auto;display:block;overflow:visible}
+  .body{transform-origin:310px 96px;animation:breathe 6s ease-in-out infinite}
+  @keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.035)}}
+  .mantle{fill:url(#mg);stroke:var(--edge);stroke-width:1.5}
+  .halo{fill:none;stroke:var(--glow);stroke-width:1;opacity:0}
+  .halo.on{animation:ring 1.8s ease-out infinite}
+  @keyframes ring{0%{opacity:.5;transform:scale(1)}100%{opacity:0;transform:scale(1.5)}}
+  .eye{fill:var(--abyss)}
+  .pupil{fill:var(--glow);animation:blink 7s infinite}
+  @keyframes blink{0%,94%,100%{transform:scaleY(1)}97%{transform:scaleY(.1)}}
+
+  .arm{fill:none;stroke-width:5.5;stroke-linecap:round;opacity:.30;
+       transition:opacity .5s ease,stroke-width .5s ease}
+  .arm.grow{animation:draw 1s cubic-bezier(.3,.8,.4,1) forwards}
+  @keyframes draw{from{stroke-dashoffset:var(--len)}to{stroke-dashoffset:0}}
+  .arm.busy{opacity:1;stroke-width:7.5;filter:drop-shadow(0 0 10px currentColor)}
+  .arm.done{opacity:.7;stroke-width:5.5}
+  .arm.failed{opacity:.42;stroke-dasharray:3 10 !important;stroke-dashoffset:0 !important}
+  .flow{fill:none;stroke:#eafffb;stroke-width:2.5;stroke-linecap:round;opacity:0;
+        stroke-dasharray:12 200}
+  .limb.busy .flow{opacity:.9;animation:swim 1.4s linear infinite}
+  @keyframes swim{from{stroke-dashoffset:212}to{stroke-dashoffset:0}}
+  .tip{fill:currentColor;opacity:0;transition:opacity .4s}
+  .limb.busy .tip{opacity:1;animation:throb 1.4s ease-in-out infinite}
+  .limb.done .tip{opacity:.75}
+  @keyframes throb{0%,100%{r:3}50%{r:5.5}}
+  .alabel{font-family:var(--mono);font-size:9px;fill:var(--muted);letter-spacing:.06em;
+          opacity:0;transition:opacity .4s}
+  .limb.busy .alabel,.limb.done .alabel,.limb.failed .alabel{opacity:.95;fill:var(--text)}
+
+  /* ---- task bar ---- */
+  .console{background:linear-gradient(180deg,#0b2836,#082129);border:1px solid var(--ridge);
+    border-radius:14px;padding:18px;margin-bottom:18px;
+    box-shadow:0 18px 50px -30px #000, inset 0 1px 0 #ffffff08}
+  textarea{width:100%;background:#061a24;color:var(--text);border:1px solid var(--ridge);
+    border-radius:10px;padding:13px 15px;font:inherit;min-height:80px;resize:vertical;
+    transition:border-color .25s,box-shadow .25s}
+  textarea:focus{outline:none;border-color:var(--glow);box-shadow:0 0 0 3px #7ff2e022}
+  .bar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:12px}
+  .hint{font-family:var(--mono);font-size:11px;color:var(--muted);flex:1;min-width:200px}
+  button.go{font-family:var(--display);font-weight:700;font-size:15px;background:var(--glow);
+    color:#03222a;border:0;border-radius:10px;padding:11px 28px;cursor:pointer;
+    transition:transform .15s,box-shadow .25s,opacity .2s;box-shadow:0 0 26px -6px #7ff2e0}
+  button.go:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 0 34px -4px #7ff2e0}
+  button.go:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+  button.go:focus-visible{outline:2px solid var(--glow);outline-offset:3px}
+  .why{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:11px;min-height:1.2em}
+  .why .tag{color:var(--glow)}
+
+  /* ---- results ---- */
+  .results{display:grid;gap:14px}
+  .wavebar{display:flex;align-items:center;gap:12px;margin:8px 0 2px;
+    font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--muted);animation:rise .5s ease both}
+  .wavebar::after{content:"";flex:1;height:1px;
+    background:linear-gradient(90deg,var(--ridge),transparent)}
+  .wavebar b{color:var(--glow);font-weight:500}
+
+  .card{background:linear-gradient(180deg,#0a242e,#071c24);border:1px solid var(--ridge);
+    border-left:3px solid var(--c);border-radius:12px;overflow:hidden;
+    animation:rise .5s cubic-bezier(.2,.7,.3,1) both}
+  @keyframes rise{from{opacity:0;transform:translateY(14px) scale(.99)}
+                  to{opacity:1;transform:none}}
+  .card.busy{box-shadow:0 0 0 1px color-mix(in srgb,var(--c) 40%,transparent),
+                        0 12px 40px -26px var(--c)}
+  .card h3{font-family:var(--display);font-size:15px;margin:0;padding:12px 15px;
+    display:flex;flex-wrap:wrap;gap:9px;align-items:baseline;border-bottom:1px solid #0f3341}
+  .card h3 .who{color:var(--c)}
+  .card h3 .role{font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--c);opacity:.75;border:1px solid currentColor;
+    border-radius:20px;padding:1px 7px}
+  .card h3 .mdl{font-family:var(--mono);font-size:11px;color:var(--muted);font-weight:400}
+  .card h3 .ms{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted);
+    font-variant-numeric:tabular-nums}
+  .card .out{padding:14px 16px;white-space:pre-wrap;word-break:break-word;
+    max-height:440px;overflow:auto}
+  .card.busy .out::after{content:"▋";color:var(--c);animation:caret 1s steps(2) infinite}
+  @keyframes caret{50%{opacity:0}}
+  .card .out:empty::after{content:"reaching into the dark…";color:var(--muted);
+    font-family:var(--mono);font-size:12px;
+    background:linear-gradient(90deg,var(--muted),var(--glow),var(--muted));
+    background-size:200% 100%;-webkit-background-clip:text;background-clip:text;
+    -webkit-text-fill-color:transparent;animation:shimmer 2.4s linear infinite}
+  @keyframes shimmer{to{background-position:-200% 0}}
+  .card pre{background:#04161d;border:1px solid #0f3341;border-radius:8px;padding:12px;
+    overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;white-space:pre}
+  .card code{font-family:var(--mono);font-size:.92em;background:#04161d;padding:1px 5px;border-radius:4px}
+  .card img{max-width:100%;border-radius:8px;display:block}
+  .fail{color:#ff9b8f;font-family:var(--mono);font-size:12.5px}
+  table.plan{width:100%;border-collapse:collapse;font-size:13.5px}
+  table.plan td{padding:8px 10px;border-top:1px solid #0f3341;vertical-align:top}
+  table.plan td.when{font-family:var(--mono);font-size:12px;color:var(--c);white-space:nowrap}
+  table.plan td.dur{font-family:var(--mono);font-size:11.5px;color:var(--muted);
+    white-space:nowrap;text-align:right}
+  .assume{font-size:12.5px;color:var(--muted);padding:10px 0 0}
+
+  /* ---- catalog ---- */
+  details.cat{margin-top:24px;border:1px solid var(--ridge);border-radius:12px;background:#08202880}
+  details.cat summary{cursor:pointer;padding:13px 16px;font-family:var(--mono);font-size:12px;
+    letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .fam{padding:0 16px 16px}
+  .fam h4{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--glow);margin:14px 0 7px}
+  .fam ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+  .fam li{font-family:var(--mono);font-size:11.5px;color:var(--muted);background:#04161d;
+    border:1px solid #0f3341;border-radius:6px;padding:4px 8px}
+  .binding{font-family:var(--mono);font-size:11.5px;color:var(--muted);padding:2px 0}
+  .binding b{color:var(--text);font-weight:500}
+
+  @media(prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation:none !important;transition:none !important}
+    .arm{stroke-dashoffset:0 !important}
+    .limb.busy .flow{opacity:.5}
+    .motes{display:none}
+  }
+</style>
+</head>
+<body>
+<div class="motes" id="motes" aria-hidden="true"></div>
+<div class="wrap">
+
+  <header>
+    <h1 class="brand">Oct<em>o</em>pus</h1>
+    <div class="stat" id="stat">reading your model catalog…</div>
+  </header>
+
+  <div class="hud" id="hud" aria-live="polite">
+    <span class="pill">agents <b id="m-agents">0</b></span>
+    <span class="pill">running <b id="m-live">0</b></span>
+    <span class="pill">waves <b id="m-waves">0</b></span>
+    <span class="pill">done <b id="m-done">0</b></span>
+    <span class="pill" id="p-failed" hidden>failed <b id="m-failed">0</b></span>
+    <span class="pill">elapsed <b id="m-time">0s</b></span>
+  </div>
+
+  <div class="creature">
+    <svg class="oct" viewBox="0 0 620 400" xmlns="http://www.w3.org/2000/svg"
+         aria-label="Agent tentacles, one per running agent">
+      <defs>
+        <radialGradient id="mg" cx="50%" cy="35%">
+          <stop offset="0%" stop-color="#1d5f74"/><stop offset="100%" stop-color="#0a2b38"/>
+        </radialGradient>
+      </defs>
+      <g id="limbs"></g>
+      <g class="body">
+        <ellipse class="halo" id="halo" cx="310" cy="96" rx="64" ry="54"/>
+        <ellipse class="mantle" cx="310" cy="96" rx="62" ry="52"/>
+        <ellipse class="eye" cx="290" cy="92" rx="9" ry="11"/>
+        <ellipse class="eye" cx="330" cy="92" rx="9" ry="11"/>
+        <circle class="pupil" cx="290" cy="93" r="3.4" style="transform-origin:290px 93px"/>
+        <circle class="pupil" cx="330" cy="93" r="3.4" style="transform-origin:330px 93px"/>
+      </g>
+    </svg>
+  </div>
+
+  <div class="console">
+    <textarea id="task" placeholder="Describe the task. Octopus works out what kind of work it is and how many agents it needs.">Migrate our billing monolith to microservices: assess the risks, write the extraction code for the invoice module, plan the cutover, and draft the customer announcement.</textarea>
+    <div class="bar">
+      <div class="hint" id="hint">it reads the task and sizes the swarm itself — nothing to pick</div>
+      <button class="go" id="go">Dispatch</button>
+    </div>
+    <div class="why" id="why"></div>
+  </div>
+
+  <div class="results" id="results"></div>
+
+  <details class="cat">
+    <summary>Verified models &amp; role bindings</summary>
+    <div class="fam" id="cat"></div>
+  </details>
+</div>
+
+<script>
+const API = location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const ROLES = ["writer","coder","scheduler","imager","analyst"];
+
+/* ---------- ambient motes ---------- */
+(function motes(){
+  const box = $("motes");
+  for (let i = 0; i < 26; i++) {
+    const m = document.createElement("div");
+    m.className = "mote";
+    const s = 1 + Math.random() * 2.4;
+    m.style.cssText = `width:${s}px;height:${s}px;left:${Math.random()*100}%;
+      bottom:-5vh;animation-duration:${16+Math.random()*22}s;
+      animation-delay:${-Math.random()*30}s;opacity:${.2+Math.random()*.5}`;
+    box.appendChild(m);
+  }
+})();
+
+/* ---------- tentacle geometry ----------
+   One arm per agent, fanned around the mantle. The whole set is re-laid-out every time an
+   agent appears, so the creature visibly grows more limbs as the pool grows — there is no
+   fixed number of them. */
+const CX = 310, CY = 96, RX = 62, RY = 52;
+
+function armPath(i, n) {
+  // Fan wider as the pool grows, but stay wide enough that two or three arms still splay
+  // instead of hanging in a bunch under the mantle.
+  const spread = Math.min(0.78 + n * 0.045, 1.36);          // radians either side of down
+  const t = n === 1 ? 0 : (i / (n - 1)) * 2 - 1;            // -1 … 1
+  const a = t * spread;
+  const sin = Math.sin(a), cos = Math.cos(a);
+  const reach = 186 + (1 - Math.abs(t)) * 40;               // middle arms hang longer
+  const sx = CX + sin * RX * 0.78, sy = CY + cos * RY * 0.9;
+  const ex = CX + sin * reach * 1.18, ey = CY + cos * reach;
+  // Perpendicular curl at the tip, alternating side, so neighbours do not overlap.
+  const px = cos, py = -sin, curl = (i % 2 ? 1 : -1) * (16 + n * 0.8);
+  const c1x = CX + sin * reach * 0.46, c1y = CY + cos * reach * 0.5;
+  const c2x = ex - sin * reach * 0.24 + px * curl, c2y = ey - cos * reach * 0.24 + py * curl;
+  return {d:`M${sx.toFixed(1)},${sy.toFixed(1)} C${c1x.toFixed(1)},${c1y.toFixed(1)} ` +
+            `${c2x.toFixed(1)},${c2y.toFixed(1)} ${ex.toFixed(1)},${ey.toFixed(1)}`,
+          ex, ey, t};
+}
+
+/* ---------- run state ---------- */
+const A = new Map();      // agent id -> {role,label,model,color,status,text,ms,el}
+let started = 0, timer = null, waves = 0;
+
+function metrics() {
+  const all = [...A.values()];
+  $("m-agents").textContent = all.length;
+  $("m-live").textContent = all.filter(a => a.status === "busy").length;
+  $("m-waves").textContent = waves;
+  $("m-done").textContent = all.filter(a => a.status === "done").length;
+  const bad = all.filter(a => a.status === "failed").length;
+  $("p-failed").hidden = !bad;
+  $("m-failed").textContent = bad;
+  const busy = all.some(a => a.status === "busy");
+  $("halo").classList.toggle("on", busy);
+  document.querySelectorAll(".pill")[1].classList.toggle("hot", busy);
+}
+
+function layout() {
+  const ids = [...A.keys()], n = ids.length, box = $("limbs");
+  ids.forEach((id, i) => {
+    const a = A.get(id), geo = armPath(i, n);
+    let g = document.getElementById("limb-" + id);
+    if (!g) {
+      g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      g.id = "limb-" + id;
+      g.setAttribute("class", "limb");
+      g.style.color = a.color;
+      g.innerHTML =
+        `<path class="arm" stroke="${a.color}"/>` +
+        `<path class="flow"/>` +
+        `<circle class="tip" r="3.5"/>` +
+        `<text class="alabel" text-anchor="middle"></text>`;
+      box.appendChild(g);
+      // Draw the new arm on: dash the whole length, then run the offset to zero.
+      requestAnimationFrame(() => {
+        const p = g.querySelector(".arm"), len = p.getTotalLength();
+        p.style.setProperty("--len", len);
+        p.style.strokeDasharray = len;
+        p.classList.add("grow");
+      });
+    }
+    const arm = g.querySelector(".arm"), flow = g.querySelector(".flow");
+    const tip = g.querySelector(".tip"), lab = g.querySelector(".alabel");
+    arm.setAttribute("d", geo.d);
+    flow.setAttribute("d", geo.d);
+    flow.setAttribute("stroke", a.color);
+    tip.setAttribute("cx", geo.ex); tip.setAttribute("cy", geo.ey);
+    lab.setAttribute("x", geo.ex + geo.t * 22);
+    // Alternate rows: adjacent tips sit at similar heights and their labels would collide.
+    lab.setAttribute("y", geo.ey + 19 + (i % 2) * 13);
+    lab.textContent = n > 14 ? "" : (n > 8 ? a.role.slice(0, 4) : a.label.slice(0, 16));
+    arm.setAttribute("class", "arm " + (a.status === "queued" ? "" : a.status) +
+                              (arm.classList.contains("grow") ? " grow" : ""));
+    g.setAttribute("class", "limb " + (a.status === "queued" ? "" : a.status));
+  });
+  metrics();
+}
+
+/* ---------- markdown-lite ---------- */
+function render(text) {
+  return text.split(/```/).map((seg, i) => {
+    if (i % 2) {
+      const nl = seg.indexOf("\n");
+      return `<pre>${esc(nl > -1 ? seg.slice(nl + 1) : seg)}</pre>`;
+    }
+    return esc(seg)
+      .replace(/^#{1,4}\s*(.+)$/gm, "<strong>$1</strong>")
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/^[-*]\s+/gm, "• ");
+  }).join("");
+}
+
+function renderPlan(el, raw) {
+  try {
+    const j = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+    if (!Array.isArray(j.items)) return false;
+    el.innerHTML = `<table class="plan">${j.items.map(i => `
+      <tr><td class="when">${esc(i.when || "")}</td>
+          <td>${esc(i.what || "")}${i.owner ? ` <span style="color:var(--muted)">· ${esc(i.owner)}</span>` : ""}</td>
+          <td class="dur">${esc(i.duration || "")}</td></tr>`).join("")}</table>` +
+      (j.assumptions?.length ? `<div class="assume">Assumed: ${j.assumptions.map(esc).join(" · ")}</div>` : "");
+    return true;
+  } catch { return false; }
+}
+
+/* ---------- card painting ----------
+   Chunks arrive far faster than the screen refreshes, and re-rendering a card's whole
+   accumulated Markdown per chunk is quadratic. With eight agents streaming at once that
+   starves the main thread — animations stutter and the clock drifts. Coalesce instead:
+   mark the card dirty, repaint at most once per frame. */
+const dirty = new Set();
+let raf = null;
+
+function paint(id) {
+  const a = A.get(id), out = $("out-" + id);
+  if (!a || !out) return;
+  if (a.role === "scheduler" && a.status === "busy") out.textContent = "assembling the plan…";
+  else if (a.role === "scheduler") { if (!renderPlan(out, a.text)) out.innerHTML = render(a.text); }
+  else out.innerHTML = render(a.text);
+}
+
+function flush() {
+  raf = null;
+  for (const id of dirty) paint(id);
+  dirty.clear();
+}
+
+function markDirty(id) {
+  dirty.add(id);
+  if (!raf) raf = requestAnimationFrame(flush);
+}
+
+/* ---------- cards ---------- */
+function card(a) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.id = "card-" + a.id;
+  el.style.setProperty("--c", a.color);
+  el.innerHTML = `<h3>
+      <span class="who">${esc(a.label)}</span>
+      <span class="role">${esc(a.role)}</span>
+      <span class="mdl">${esc(a.model || "—")}</span>
+      <span class="ms" id="ms-${a.id}"></span>
+    </h3><div class="out" id="out-${a.id}"></div>`;
+  $("results").appendChild(el);
+  return el;
+}
+
+function waveBar(n, why, count) {
+  const el = document.createElement("div");
+  el.className = "wavebar";
+  el.innerHTML = `<span>wave <b>${n}</b> · <b>${count}</b> agent${count === 1 ? "" : "s"} in parallel</span>`;
+  $("results").appendChild(el);
+  $("why").innerHTML = `<span class="tag">wave ${n}</span> ${esc(why)}`;
+}
+
+/* ---------- catalog ---------- */
+async function loadCatalog() {
+  try {
+    const r = await fetch(API + "/api/catalog");
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "catalog unavailable");
+    $("stat").innerHTML = `<b>${d.verified}</b> of ${d.total} listed models answered · ` +
+      Object.entries(d.families).map(([f, m]) => `${f} ${m.length}`).join(" · ") +
+      ` · <a href="/console">key console</a>`;
+    $("cat").innerHTML = `<h4>role bindings</h4>` +
+      d.tentacles.map(t => `<div class="binding">${esc(t.name)} → <b>${esc(t.model || "—")}</b>
+        <span>(${esc(t.bound_via)})</span></div>`).join("") +
+      `<h4>verified · ${d.live.length}</h4><ul>${d.live.map(m => `<li>${esc(m)}</li>`).join("")}</ul>` +
+      Object.entries(d.families).map(([f, models]) =>
+        `<h4>${f} · ${models.length}</h4><ul>${models.map(m => `<li>${esc(m)}</li>`).join("")}</ul>`).join("");
+  } catch (err) {
+    $("stat").textContent = err.message;
+  }
+}
+
+/* ---------- dispatch ---------- */
+$("go").onclick = async () => {
+  const task = $("task").value.trim();
+  if (!task) return;
+  $("go").disabled = true;
+  $("results").innerHTML = "";
+  $("limbs").innerHTML = "";
+  A.clear(); waves = 0;
+  $("why").textContent = "reading the task…";
+  started = Date.now();
+  clearInterval(timer);
+  timer = setInterval(() => {
+    $("m-time").textContent = Math.round((Date.now() - started) / 1000) + "s";
+  }, 250);
+  layout();
+
+  try {
+    const r = await fetch(API + "/api/dispatch", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({task})          // no role selection: the planner decides
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split("\n"); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        let e; try { e = JSON.parse(line.slice(5)); } catch { continue; }
+
+        if (e.event === "wave") {
+          waves = e.n;
+          waveBar(e.n, e.why, e.agents.length);
+          for (const g of e.agents) {
+            A.set(g.id, {...g, status: "queued", text: ""});
+            card(A.get(g.id));
+          }
+          layout();
+        }
+        else if (e.event === "start") {
+          const a = A.get(e.id); if (!a) continue;
+          a.status = "busy";
+          $("card-" + e.id)?.classList.add("busy");
+          layout();
+        }
+        else if (e.event === "chunk") {
+          const a = A.get(e.id); if (!a) continue;
+          a.text += e.text;
+          markDirty(e.id);
+        }
+        else if (e.event === "image") {
+          $("out-" + e.id).innerHTML = `<img src="${e.image}" alt="generated image">`;
+          $("ms-" + e.id).textContent = e.latency_ms + " ms";
+        }
+        else if (e.event === "done") {
+          const a = A.get(e.id); if (!a) continue;
+          a.status = "done"; a.ms = e.latency_ms;
+          $("card-" + e.id)?.classList.remove("busy");
+          $("ms-" + e.id).textContent = e.latency_ms + " ms";
+          dirty.delete(e.id);
+          paint(e.id);          // final paint, including the scheduler's plan table
+          layout();
+        }
+        else if (e.event === "error") {
+          const a = A.get(e.id); if (!a) continue;
+          a.status = "failed";
+          dirty.delete(e.id);
+          $("card-" + e.id)?.classList.remove("busy");
+          $("out-" + e.id).innerHTML = `<span class="fail">${esc(e.detail)}</span>`;
+          layout();
+        }
+        else if (e.event === "rebind") {
+          $("why").innerHTML = `<span class="tag">re-bound</span> dropped ` +
+            `${esc(e.dropped)} — retrying on another model`;
+        }
+        else if (e.event === "fatal") {
+          $("why").innerHTML = `<span class="fail">${esc(e.detail)}</span>`;
+        }
+        else if (e.event === "complete") {
+          const secs = Math.round((Date.now() - started) / 1000);
+          $("m-time").textContent = secs + "s";
+          $("why").innerHTML = `<span class="tag">complete</span> ` +
+            `${e.agents} agent${e.agents === 1 ? "" : "s"} across ${e.waves} ` +
+            `wave${e.waves === 1 ? "" : "s"} · ${e.ok} succeeded` +
+            (e.failed ? ` · ${e.failed} failed` : "") + ` · ${secs}s`;
+        }
+      }
+    }
+  } catch (err) {
+    $("why").innerHTML = `<span class="fail">${esc(err.message)}</span>`;
+  }
+  clearInterval(timer);
+  metrics();
+  $("go").disabled = false;
+};
+
+$("task").addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") $("go").click();
+});
+
+loadCatalog();
+</script>
+</body>
+</html>
