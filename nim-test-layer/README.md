@@ -1,26 +1,42 @@
-# NIM Test Layer
+# Octopus — test layer and agent console
 
-A local wrapper around the NVIDIA NIM API (`build.nvidia.com`) so you can verify a key,
-list reachable models, and fire prompts — without pasting the key into a browser page or
-hitting CORS. The key stays in `.env` on your machine; the browser only ever talks to
-`127.0.0.1`.
+A local wrapper around two model providers — an **Ollama server on this machine** and the
+**NVIDIA NIM API** (`build.nvidia.com`) — so you can verify a key, list reachable models,
+and fire prompts without pasting the key into a browser page or hitting CORS. The key
+stays in `.env` on your machine; the browser only ever talks to `127.0.0.1`.
 
 On top of that sits **Octopus**: describe a task and it decides what kind of work it is,
-splits it into as many agents as the task warrants, and runs them in parallel against
-whichever models your key can actually reach.
+splits it into as many agents as the task warrants, runs them in parallel, and routes each
+one to whichever provider suits it. See [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md).
 
 ## Setup
 
+macOS / Linux:
+
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # then paste your nvapi- key into .env
+cp .env.example .env
+```
+
+Windows (PowerShell):
+
+```bash
+python -m venv .venv; .venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
+```
+
+A NIM key in `.env` is optional. For local models, install Ollama and pull at least one:
+
+```bash
+ollama pull llama3.2:3b
 ```
 
 ## Run
 
 ```bash
-uvicorn app:app --reload --port 8000
+python -m uvicorn app:app --reload --port 8000
 ```
 
 Open http://127.0.0.1:8000 for Octopus, or `/console` for the key self-test.
@@ -69,6 +85,35 @@ Two rules keep it from spinning: a deliverable that already succeeded is never r
 one that fails gets exactly one retry — on a different model, because a failure that looks
 like the model's fault drops that model and re-binds the role mid-run.
 
+## Where each agent runs
+
+Every subtask is weighed before a model is bound to it — role baseline, plus depth cues
+("comprehensive", "migration", "production-ready"), minus brevity cues ("short", "quick",
+"typo"), adjusted for request length and listed requirements. Score `≥ 0.55` is heavy.
+
+| | local | nvidia |
+|---|---|---|
+| Key | none | `NVIDIA_API_KEY` |
+| Catalog | trusted (Ollama lists only what is on disk) | probed model by model |
+| Read timeout | 300 s — a cold 7B loads from disk first | 45 s — fail fast |
+| Token cap | 700 (`LOCAL_MAX_TOKENS`) | role default, 1400–2000 |
+| Parallelism | 2 (`OCTOPUS_LOCAL_PARALLEL`) — shares this CPU | 6 (`OCTOPUS_MAX_PARALLEL`) |
+| Gets | light work | heavy work, image generation, planning |
+
+Planning and supervision are never weighed: they always take the strongest provider that
+is up, because a small model sizes a pool badly and every extra agent it invents costs a
+completion.
+
+Availability beats preference — with one provider down, everything routes to the other.
+
+```bash
+# dry-run the decision without dispatching anything
+curl -s localhost:8000/api/route -H 'Content-Type: application/json' \
+  -d '{"role":"writer","subtask":"Write a short thank-you note."}' | jq
+```
+
+Tune with `OCTOPUS_ROUTE` (`auto` | `local` | `nvidia`) and `OCTOPUS_ROUTE_THRESHOLD`.
+
 ## Listed is not the same as served
 
 `GET /v1/models` returns everything the catalog knows about, not what your key can
@@ -91,9 +136,11 @@ for streaming it is the gap between chunks), and `NIM_PROBE_TIMEOUT`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/health` | Is a key loaded, and from where (fingerprint only, never the key) |
-| GET | `/api/models` | Every model ID the catalog lists, with latency |
-| GET | `/api/catalog` | Which of those actually answer, grouped, with role bindings |
+| GET | `/api/health` | What is usable right now (key fingerprint only, never the key) |
+| GET | `/api/providers` | Every registered provider, its state, and the routing config |
+| POST | `/api/route` | Dry-run: where would this subtask go, and why? Dispatches nothing |
+| GET | `/api/models` | Every model ID one provider lists (`?provider=local`) |
+| GET | `/api/catalog` | Which of those actually answer, grouped, with per-provider bindings |
 | POST | `/api/dispatch` | Plan and run an agent pool over one task, streamed as SSE |
 | POST | `/api/chat` | Single completion, returns text + token usage |
 | POST | `/api/chat/stream` | SSE passthrough |
@@ -102,10 +149,18 @@ for streaming it is the gap between chunks), and `NIM_PROBE_TIMEOUT`.
 Send `X-NIM-Key` on any of these to override the `.env` key for one call — handy for
 comparing two keys without a restart.
 
+Model ids are qualified as `provider:model`. A bare id means NIM, which is what every id
+meant before providers existed, so old scripts keep working.
+
 ```bash
 curl -s localhost:8000/api/chat -H 'Content-Type: application/json' \
-  -d '{"prompt":"ping","model":"meta/llama-3.1-8b-instruct"}' | jq
+  -d '{"prompt":"ping","model":"local:qwen2.5:7b"}' | jq
+
+curl -s localhost:8000/api/chat -H 'Content-Type: application/json' \
+  -d '{"prompt":"ping","model":"nvidia:meta/llama-3.1-8b-instruct"}' | jq
 ```
+
+`POST /api/dispatch` also takes `{"mode": "local"|"nvidia"}` to pin one run.
 
 ## Reading failures
 
@@ -114,7 +169,12 @@ curl -s localhost:8000/api/chat -H 'Content-Type: application/json' \
 - **404** — model ID typo, or a catalogued model your key cannot actually run. NIM IDs
   are namespaced, e.g. `meta/llama-3.1-8b-instruct`.
 - **429** — free-tier credits exhausted or rate limited.
+- **503** — a provider is not answering at all. For local that almost always means Ollama
+  is not running: start it with `ollama serve`, or check `ollama list` shows a model.
 - **504** — raised locally, not by NVIDIA: the model took the request and sent nothing
   back. Almost always a listed-but-not-served model rather than a problem with your key.
+- **`bad key` at startup** — the key is present but was rejected. NIM serves its model
+  list to anyone, so this is caught by a separate one-token auth probe rather than by the
+  catalog read appearing to succeed.
 
 Never commit `.env` — `.gitignore` already covers it.

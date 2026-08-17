@@ -124,6 +124,14 @@
     text-transform:uppercase;color:var(--c);opacity:.75;border:1px solid currentColor;
     border-radius:20px;padding:1px 7px}
   .card h3 .mdl{font-family:var(--mono);font-size:11px;color:var(--muted);font-weight:400}
+  /* Which machine answered. Worth a colour of its own: the whole point of the router is
+     that two agents on the same screen can have come from completely different places. */
+  .card h3 .prov{font-family:var(--mono);font-size:10px;letter-spacing:.08em;
+    text-transform:uppercase;border-radius:4px;padding:2px 6px;font-weight:600}
+  .prov[data-p="local"]{background:#12313f;color:#8ab4f8;border:1px solid #24506b}
+  .prov[data-p="nvidia"]{background:#1b2c0d;color:#a8e63a;border:1px solid #3c5f14}
+  .card h3 .rwhy{font-family:var(--mono);font-size:10.5px;color:var(--muted);opacity:.8;
+    flex-basis:100%;margin-top:-2px}
   .card h3 .ms{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted);
     font-variant-numeric:tabular-nums}
   .card .out{padding:14px 16px;white-space:pre-wrap;word-break:break-word;
@@ -383,6 +391,10 @@ function markDirty(id) {
   if (!raf) raf = requestAnimationFrame(flush);
 }
 
+/* Model ids are qualified — 'local:qwen2.5:7b'. The provider is already a chip of its
+   own next to the name, so repeating it in the model column is just noise. */
+const bare = m => (m || "").replace(/^(local|nvidia|openai|anthropic):/, "");
+
 /* ---------- cards ---------- */
 function card(a) {
   const el = document.createElement("div");
@@ -392,8 +404,10 @@ function card(a) {
   el.innerHTML = `<h3>
       <span class="who">${esc(a.label)}</span>
       <span class="role">${esc(a.role)}</span>
-      <span class="mdl">${esc(a.model || "—")}</span>
+      ${a.provider ? `<span class="prov" data-p="${esc(a.provider)}">${esc(a.provider)}</span>` : ""}
+      <span class="mdl">${esc(bare(a.model) || "—")}</span>
       <span class="ms" id="ms-${a.id}"></span>
+      ${a.route_why ? `<span class="rwhy">routed: ${esc(a.route_why)}</span>` : ""}
     </h3><div class="out" id="out-${a.id}"></div>`;
   $("results").appendChild(el);
   return el;
@@ -413,12 +427,26 @@ async function loadCatalog() {
     const r = await fetch(API + "/api/catalog");
     const d = await r.json();
     if (!r.ok) throw new Error(d.detail || "catalog unavailable");
-    $("stat").innerHTML = `<b>${d.verified}</b> of ${d.total} listed models answered · ` +
-      Object.entries(d.families).map(([f, m]) => `${f} ${m.length}`).join(" · ") +
+    const up = (d.providers || []).filter(p => p.usable);
+    const chips = (d.providers || []).map(p =>
+      `<span class="prov" data-p="${esc(p.name)}" title="${esc(p.note)}"
+        style="${p.usable ? "" : "opacity:.4;filter:grayscale(1)"}">${esc(p.name)}</span>`).join(" ");
+    $("stat").innerHTML = chips +
+      ` · <b>${d.verified}</b> of ${d.total} models answered · routing <b>${esc(d.route_mode)}</b>` +
       ` · <a href="/console">key console</a>`;
-    $("cat").innerHTML = `<h4>role bindings</h4>` +
-      d.tentacles.map(t => `<div class="binding">${esc(t.name)} → <b>${esc(t.model || "—")}</b>
-        <span>(${esc(t.bound_via)})</span></div>`).join("") +
+
+    // Bindings are per provider now: which model a role gets depends on where the
+    // router sent it, and that is decided per subtask rather than once at load.
+    const binds = Object.entries(d.bindings || {}).map(([name, rows]) =>
+      `<h4>${esc(name)} bindings</h4>` + rows.map(t =>
+        `<div class="binding">${esc(t.name)} → <b>${esc(bare(t.model) || "—")}</b>
+          <span>(${esc(t.bound_via)})</span></div>`).join("")).join("");
+
+    $("cat").innerHTML =
+      `<h4>providers</h4>` + (d.providers || []).map(p =>
+        `<div class="binding">${esc(p.label)} → <b>${esc(p.state)}</b>
+          <span>${esc(p.note)}</span></div>`).join("") +
+      binds +
       `<h4>verified · ${d.live.length}</h4><ul>${d.live.map(m => `<li>${esc(m)}</li>`).join("")}</ul>` +
       Object.entries(d.families).map(([f, models]) =>
         `<h4>${f} · ${models.length}</h4><ul>${models.map(m => `<li>${esc(m)}</li>`).join("")}</ul>`).join("");
@@ -461,7 +489,13 @@ $("go").onclick = async () => {
         if (!line.startsWith("data:")) continue;
         let e; try { e = JSON.parse(line.slice(5)); } catch { continue; }
 
-        if (e.event === "wave") {
+        if (e.event === "providers") {
+          // Sent once, before wave 1, so the run states up front where it can send work.
+          const up = e.providers.filter(p => p.usable).map(p => p.name);
+          $("why").innerHTML = `<span class="tag">routing ${esc(e.mode)}</span> ` +
+            `dispatching across ${up.map(n => `<b>${esc(n)}</b>`).join(" + ") || "nothing"}`;
+        }
+        else if (e.event === "wave") {
           waves = e.n;
           waveBar(e.n, e.why, e.agents.length);
           for (const g of e.agents) {
@@ -512,10 +546,13 @@ $("go").onclick = async () => {
         else if (e.event === "complete") {
           const secs = Math.round((Date.now() - started) / 1000);
           $("m-time").textContent = secs + "s";
+          const split = Object.entries(e.by_provider || {})
+            .map(([n, c]) => `${c} ${n}`).join(" + ");
           $("why").innerHTML = `<span class="tag">complete</span> ` +
             `${e.agents} agent${e.agents === 1 ? "" : "s"} across ${e.waves} ` +
             `wave${e.waves === 1 ? "" : "s"} · ${e.ok} succeeded` +
-            (e.failed ? ` · ${e.failed} failed` : "") + ` · ${secs}s`;
+            (e.failed ? ` · ${e.failed} failed` : "") +
+            (split ? ` · ${split}` : "") + ` · ${secs}s`;
         }
       }
     }
