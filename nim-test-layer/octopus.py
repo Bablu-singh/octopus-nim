@@ -1,7 +1,12 @@
-"""Octopus orchestrator — routes one task across several NIM models at once.
+"""Octopus orchestrator — routes one task across several models at once.
 
 Mounted onto the existing test layer by app.py. Everything streams over a single SSE
 connection so the UI can light tentacles up as they start, finish, or fail independently.
+
+Models come from more than one place now. `catalog()` merges every reachable provider
+into a single pool of qualified ids, and `dispatch()` asks `routing` where each agent's
+work should go before binding a model to it — small work to the local machine, heavy work
+to NIM, everything to whichever one is actually up. See providers.py and routing.py.
 """
 
 from __future__ import annotations
@@ -16,7 +21,8 @@ from typing import AsyncIterator
 import httpx
 
 import agents
-import nim_client as nim
+import providers
+import routing
 
 IMAGE_BASE = os.getenv("NVIDIA_IMAGE_BASE", "https://ai.api.nvidia.com/v1/genai")
 CATALOG_TTL = 900          # seconds; verification is expensive, so cache it for a while
@@ -29,6 +35,10 @@ MAX_AGENTS = int(os.getenv("OCTOPUS_MAX_AGENTS", "24"))      # total, across all
 FIRST_WAVE = int(os.getenv("OCTOPUS_FIRST_WAVE", "8"))       # cap on the opening plan
 MAX_WAVES = int(os.getenv("OCTOPUS_MAX_WAVES", "4"))         # planner + 3 growth rounds
 MAX_PARALLEL = int(os.getenv("OCTOPUS_MAX_PARALLEL", "6"))   # concurrent upstream streams
+# Local inference competes for the same cores, so parallelism there is negative value past
+# a point: two 7Bs on eight cores each run at less than half speed. Hosted models have no
+# such problem, which is why the limit is per provider rather than global.
+LOCAL_PARALLEL = int(os.getenv("OCTOPUS_LOCAL_PARALLEL", "2"))
 DIGEST_CHARS = 700         # per agent, when summarising a wave for the supervisor
 
 # Keyed by fingerprint: two different keys have different entitlements, and sharing one
@@ -36,13 +46,25 @@ DIGEST_CHARS = 700         # per agent, when summarising a wave for the supervis
 _catalog: dict[str, dict] = {}
 
 
-async def _verify(key: str, ids: list[str]) -> set[str]:
+def _slot_key(key: str | None) -> str:
+    return providers.key_fingerprint(key or "") or "no-key"
+
+
+async def _verify(p: providers.Provider, ids: list[str]) -> set[str]:
     """Probe every model any tentacle might want, and return the ones that answer.
 
-    The catalog is aspirational — on a typical key most listed models 404 and several
+    NIM's catalog is aspirational — on a typical key most listed models 404 and several
     accept a connection then never respond. Probing here, once, is what stops a dispatch
     from stalling on a dead model.
+
+    A local catalog is not aspirational: Ollama lists what is on disk, and a cold 7B can
+    take a minute to load, so probing it would add minutes to a catalog read to confirm
+    something already known. Those providers are trusted on sight and dropped by
+    `_mark_dead` if they ever actually fail.
     """
+    if p.trust_catalog:
+        return set(ids)
+
     wanted: list[str] = []
     for t in agents.TENTACLES:
         wanted += [m for m, _ in agents.shortlist(t, ids)]
@@ -52,29 +74,63 @@ async def _verify(key: str, ids: list[str]) -> set[str]:
 
     async def check(client: httpx.AsyncClient, mid: str) -> tuple[str, bool]:
         async with sem:
-            return mid, await nim.is_alive(key, mid, client)
+            return mid, await providers.is_alive(p, mid, client)
 
-    async with httpx.AsyncClient(timeout=nim.PROBE) as client:
+    async with httpx.AsyncClient(timeout=p.probe) as client:
         results = await asyncio.gather(*(check(client, m) for m in wanted))
     return {mid for mid, ok in results if ok}
 
 
-async def catalog(key: str, force: bool = False) -> dict:
-    """Live model list, cached so the UI can poll without re-probing the whole catalog."""
-    slot = _catalog.get(nim.key_fingerprint(key))
+async def _read_provider(p: providers.Provider) -> tuple[list[str], set[str], str]:
+    """One provider's catalog, or empty lists plus the reason it gave nothing."""
+    try:
+        ids = await providers.model_ids(p)
+    except providers.ProviderError as err:
+        return [], set(), f"HTTP {err.status}: {err.detail[:160]}"
+    if not ids:
+        return [], set(), "listed no models"
+    return ids, await _verify(p, ids), ""
+
+
+async def catalog(key: str | None = None, force: bool = False) -> dict:
+    """Everything reachable right now, from every provider, as one pool.
+
+    Cached, because verifying NIM costs a probe per candidate model and the UI polls this.
+    """
+    slot = _catalog.get(_slot_key(key))
     if slot and not force and time.time() - slot["fetched_at"] < CATALOG_TTL:
-        ids, live, latency = slot["ids"], slot["live"], None
+        ids, live, per, latency = slot["ids"], slot["live"], slot["per"], None
     else:
-        result = await nim.list_models(key)
-        ids = sorted(m.get("id", "") for m in result.data.get("data", []) if m.get("id"))
-        live = await _verify(key, ids)
-        _catalog[nim.key_fingerprint(key)] = {
-            "ids": ids, "live": live, "fetched_at": time.time()
+        started = time.perf_counter()
+        survey = await providers.survey(key)
+        up = [s["name"] for s in survey if s["usable"]]
+
+        # Concurrently: a slow local load must not hold up the hosted catalog, and a
+        # hosted timeout must not hold up local.
+        reads = await asyncio.gather(*(
+            _read_provider(providers.with_key(providers.get(n), key)) for n in up
+        ), return_exceptions=True)
+
+        ids, live, per = [], set(), {}
+        for name, read in zip(up, reads):
+            if isinstance(read, BaseException):
+                per[name] = {"total": 0, "verified": 0, "note": f"{type(read).__name__}"}
+                continue
+            pids, plive, note = read
+            ids += pids
+            live |= plive
+            per[name] = {"total": len(pids), "verified": len(plive), "note": note}
+        ids = sorted(ids)
+
+        _catalog[_slot_key(key)] = {
+            "ids": ids, "live": live, "per": per, "survey": survey,
+            "fetched_at": time.time(),
         }
+        latency = int((time.perf_counter() - started) * 1000)
 
-        latency = result.latency_ms
-
+    survey = _catalog[_slot_key(key)]["survey"]
     grouped = agents.classify(ids)
+    usable = {s["name"] for s in survey if s["usable"]}
     return {
         "total": len(ids),
         "verified": len(live),
@@ -85,18 +141,25 @@ async def catalog(key: str, force: bool = False) -> dict:
         "latency_ms": latency,
         "cached": latency is None,
         "families": {k: grouped[k] for k in sorted(grouped, key=lambda f: -len(grouped[f]))},
+        "providers": survey,
+        "by_provider": per,
+        "route_mode": routing.MODE,
+        # What each role would bind to, per provider. The router picks the provider at
+        # dispatch time from the subtask, so showing only one binding per role would be
+        # showing a decision that has not been made yet.
+        "bindings": {name: agents.bind(ids, live=live, provider=name) for name in usable},
         "tentacles": agents.bind(ids, live=live),
     }
 
 
-def _mark_dead(key: str, model: str | None) -> None:
+def _mark_dead(key: str | None, model: str | None) -> None:
     """Forget a model that failed for real, and force a re-probe on the next catalog read.
 
     Entitlements and cold-start behaviour drift, so a binding that worked when the cache
     was filled can break inside the TTL. Without this the same dead model would be handed
     out for the rest of the window.
     """
-    slot = _catalog.get(nim.key_fingerprint(key))
+    slot = _catalog.get(_slot_key(key))
     if slot and model and model in slot["live"]:
         slot["live"].discard(model)
         slot["fetched_at"] = 0.0
@@ -136,27 +199,28 @@ def _parse_agents(raw: str, budget: int, task: str) -> tuple[list[dict], str]:
     return out[:budget], str(parsed.get("why", "") or "")
 
 
-async def plan(key: str, task: str, model: str | None, budget: int) -> tuple[list[dict], str]:
+async def plan(key: str | None, task: str, model: str | None,
+               budget: int) -> tuple[list[dict], str]:
     """Decompose the task into a first wave of agents. Falls back to keywords on failure."""
     if not model:
         return agents.keyword_plan(task, budget), "keyword planning (no planner model available)"
     try:
-        result = await nim.chat(
-            key, f"Task:\n{task}", model,
-            system=agents.planner_system(budget), temperature=0.0, max_tokens=1500,
+        result = await providers.chat(
+            model, f"Task:\n{task}",
+            system=agents.planner_system(budget), temperature=0.0, max_tokens=1500, key=key,
         )
-        picks, why = _parse_agents(nim.extract_text(result.data), budget, task)
+        picks, why = _parse_agents(providers.extract_text(result.data), budget, task)
         if picks:
             return picks, why or "planned by model"
         why = "planner returned no usable agents"
-    except nim.NimError as err:
+    except providers.ProviderError as err:
         why = f"planner unavailable (HTTP {err.status})"
     except (ValueError, KeyError, TypeError):
         why = "planner did not return usable JSON"
     return agents.keyword_plan(task, budget), f"keyword planning ({why})"
 
 
-async def supervise(key: str, task: str, model: str | None, digest: str,
+async def supervise(key: str | None, task: str, model: str | None, digest: str,
                     budget: int) -> tuple[list[dict], str]:
     """Having seen the wave that just finished, decide whether the task needs more agents.
 
@@ -166,78 +230,87 @@ async def supervise(key: str, task: str, model: str | None, digest: str,
     if not model or budget <= 0:
         return [], ""
     try:
-        result = await nim.chat(
-            key, f"Task:\n{task}\n\nProduced so far:\n{digest}", model,
-            system=agents.supervisor_system(budget), temperature=0.0, max_tokens=1200,
+        result = await providers.chat(
+            model, f"Task:\n{task}\n\nProduced so far:\n{digest}",
+            system=agents.supervisor_system(budget), temperature=0.0, max_tokens=1200, key=key,
         )
-        return _parse_agents(nim.extract_text(result.data), budget, task)
-    except (nim.NimError, ValueError, KeyError, TypeError):
+        return _parse_agents(providers.extract_text(result.data), budget, task)
+    except (providers.ProviderError, ValueError, KeyError, TypeError):
         # A supervisor that cannot answer means "no more agents", never a failed dispatch.
         return [], ""
 
 
 async def _generate_image(key: str, model: str, prompt: str) -> dict:
     """NIM image models use the genai endpoint, not the OpenAI-compatible one."""
-    url = f"{IMAGE_BASE}/{model}"
+    url = f"{IMAGE_BASE}/{providers.bare(model)}"
     body = {"prompt": prompt, "cfg_scale": 5, "mode": "base", "steps": 30, "seed": 0}
+    nvidia = providers.get("nvidia")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=120.0,
                                                            write=30.0, pool=10.0)) as client:
             resp = await client.post(
                 url, json=body,
-                headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+                headers={"Authorization": f"Bearer {key or nvidia.key()}",
+                         "Accept": "application/json"},
             )
             if resp.status_code >= 400:
-                raise nim.NimError(resp.status_code, resp.text[:400])
+                raise providers.ProviderError(resp.status_code, resp.text[:400], "nvidia")
             data = resp.json()
     except httpx.HTTPError as err:
-        raise nim.transport_error(err, model) from err
+        raise providers.transport_error(err, nvidia, model) from err
     # Response shape varies by model family; check the documented spots in turn.
     b64 = (data.get("image")
            or (data.get("artifacts") or [{}])[0].get("base64")
            or (data.get("data") or [{}])[0].get("b64_json"))
     if not b64:
-        raise nim.NimError(502, f"No image field in response. Keys: {list(data)[:6]}")
+        raise providers.ProviderError(502, f"No image field in response. Keys: {list(data)[:6]}",
+                                      "nvidia")
     return {"image": f"data:image/png;base64,{b64}"}
 
 
-async def _run_agent(key: str, agent: dict, queue: asyncio.Queue, sem: asyncio.Semaphore,
-                     outputs: dict[str, str]) -> None:
+async def _run_agent(key: str | None, agent: dict, queue: asyncio.Queue,
+                     sems: dict[str, asyncio.Semaphore], outputs: dict[str, str]) -> None:
     """Run one agent to completion, streaming as it goes.
 
     The model is passed in on the agent dict rather than read off the shared role template,
     so any number of agents — including several sharing a role — can run at once without
-    treading on each other. `sem` bounds how many actually talk upstream at the same time;
-    everything else here is fully concurrent.
+    treading on each other. The semaphore comes from `sems` by provider: local work queues
+    behind a much narrower limit than hosted work, because it is contending for this
+    machine's cores rather than someone else's GPUs.
     """
     aid, role, model = agent["id"], agent["role"], agent["model"]
     t = agents.BY_ID[role]
     outputs[aid] = ""
+    prov = agent.get("provider") or (providers.provider_of(model) if model else None)
 
     await queue.put(_event("queued", id=aid, role=role, label=agent["label"],
-                           model=model, name=t.name, color=t.color))
+                           model=model, name=t.name, color=t.color,
+                           provider=prov, route_why=agent.get("route_why", "")))
 
     if not model:
         await queue.put(_event("error", id=aid,
-                               detail="No model this key can actually reach fits this role."))
+                               detail=agent.get("route_why")
+                                      or "No reachable model fits this role."))
         return
 
-    async with sem:
+    async with sems.get(prov, sems["nvidia"]):
         started = time.perf_counter()
         ms = lambda: int((time.perf_counter() - started) * 1000)
         await queue.put(_event("start", id=aid, role=role, label=agent["label"],
-                               model=model, name=t.name, color=t.color))
+                               model=model, name=t.name, color=t.color,
+                               provider=prov, route_why=agent.get("route_why", "")))
         try:
             if t.kind == "image" and agents.family_of(model) == "image":
-                out = await _generate_image(key, model, agent["subtask"])
+                out = await _generate_image(key or "", model, agent["subtask"])
                 await queue.put(_event("image", id=aid, **out, latency_ms=ms()))
-                await queue.put(_event("done", id=aid, model=model, latency_ms=ms()))
+                await queue.put(_event("done", id=aid, model=model, provider=prov,
+                                       latency_ms=ms()))
                 return
 
             chunks = 0
-            async for line in nim.chat_stream(key, agent["subtask"], model, system=t.system,
-                                              temperature=t.temperature,
-                                              max_tokens=t.max_tokens):
+            async for line in providers.chat_stream(model, agent["subtask"], system=t.system,
+                                                    temperature=t.temperature,
+                                                    max_tokens=t.max_tokens, key=key):
                 if not line.startswith("data:"):
                     continue
                 payload = line[5:].strip()
@@ -254,64 +327,85 @@ async def _run_agent(key: str, agent: dict, queue: asyncio.Queue, sem: asyncio.S
 
             if chunks == 0:
                 _mark_dead(key, model)
-                await queue.put(_event("error", id=aid, model=model, model_at_fault=True,
+                await queue.put(_event("error", id=aid, model=model, provider=prov,
+                                       model_at_fault=True,
                                        detail=f"'{model}' streamed no content — listed, but "
                                               f"not serving this request."))
                 return
-            await queue.put(_event("done", id=aid, model=model, latency_ms=ms()))
+            await queue.put(_event("done", id=aid, model=model, provider=prov,
+                                   latency_ms=ms()))
         except asyncio.CancelledError:
             raise
-        except nim.NimError as err:
+        except providers.ProviderError as err:
             # These say the binding is bad rather than the prompt, so the caller should
             # swap models rather than retry the same one. 503 is capacity, not breakage.
             at_fault = err.status in (404, 429, 500, 502, 503, 504)
             if at_fault:
                 _mark_dead(key, model)
-            await queue.put(_event("error", id=aid, model=model, model_at_fault=at_fault,
+            await queue.put(_event("error", id=aid, model=model, provider=prov,
+                                   model_at_fault=at_fault,
                                    detail=f"HTTP {err.status}: {err.detail[:300]}"))
         except Exception as err:  # keep one failed agent from killing the others
-            await queue.put(_event("error", id=aid, model=model, model_at_fault=False,
+            await queue.put(_event("error", id=aid, model=model, provider=prov,
+                                   model_at_fault=False,
                                    detail=f"{type(err).__name__}: {err}"))
 
 
-async def dispatch(key: str, task: str, roles: list[str] | None = None) -> AsyncIterator[str]:
+async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
+                   mode: str | None = None) -> AsyncIterator[str]:
     """Grow a pool of agents around one task and stream all of them at once.
 
     The task decides how many agents run — a one-line request gets one, a broad one gets a
     dozen. Wave 1 comes from the planner; after each wave the supervisor sees what came
     back and adds more if the work is not covered, until it says stop or a budget runs out.
-    Everything inside a wave runs concurrently, `MAX_PARALLEL` of them talking upstream at
-    any moment.
+
+    It also decides *where* each of them runs. Every agent's subtask is weighed before a
+    model is bound to it, and light work goes to the local machine while heavy work goes
+    to NIM — so an eight-agent dispatch can be half local and half hosted, and a run with
+    one provider down still completes on the other.
 
     `roles` is a debugging escape hatch that seeds wave 1 by hand. The UI never sends it:
     identifying the kind of work is the planner's job, not the user's.
     """
     try:
         cat = await catalog(key)
-    except nim.NimError as err:
+    except providers.ProviderError as err:
         yield _event("fatal", detail=f"Could not read the model catalog — "
                                      f"HTTP {err.status}: {err.detail[:200]}")
         yield _event("complete", agents=0, waves=0)
         return
 
     ids, live = cat["ids"], set(cat["live"])
+    usable = {p["name"] for p in cat["providers"] if p["usable"]}
     dead: set[str] = set()
 
-    def rebind() -> dict[str, str | None]:
-        return {t["id"]: t["model"] for t in agents.bind(ids, live=live - dead)}
+    yield _event("providers", providers=cat["providers"], mode=mode or routing.MODE)
 
-    bound = rebind()
-    if not any(bound.values()):
+    def rebind(provider: str) -> dict[str, str | None]:
+        return {t["id"]: t["model"]
+                for t in agents.bind(ids, live=live - dead, provider=provider)}
+
+    bound: dict[str, dict[str, str | None]] = {p: rebind(p) for p in usable}
+    if not any(m for table in bound.values() for m in table.values()):
+        reachable = ", ".join(sorted(usable)) or "nothing"
         yield _event("fatal", detail=(
-            f"This key lists {cat['total']} models but none of them answered a test request. "
-            "Check entitlements at build.nvidia.com/settings/api-keys."))
+            f"Reached {reachable}, but no model there answered a test request. "
+            "Check entitlements at build.nvidia.com/settings/api-keys, or that "
+            "`ollama list` shows a pulled model."))
         yield _event("complete", agents=0, waves=0)
         return
 
-    thinker = agents.pick_planner(live - dead)
+    planner_provider, planner_why = routing.choose_planner(usable, mode)
+    thinker = agents.pick_planner(live - dead, planner_provider)
+
+    # Scored once, against the whole task rather than a subtask, and used only to decide
+    # whether growing the pool past wave 1 can possibly be justified. See the wave loop.
+    task_weight, _ = routing.weigh(task, "analyst")
 
     queue: asyncio.Queue = asyncio.Queue()
-    sem = asyncio.Semaphore(MAX_PARALLEL)
+    sems = {"local": asyncio.Semaphore(LOCAL_PARALLEL)}
+    for name in usable | {"nvidia"}:
+        sems.setdefault(name, asyncio.Semaphore(MAX_PARALLEL))
     outputs: dict[str, str] = {}
     workers: list[asyncio.Task] = []
     spawned: list[dict] = []
@@ -322,8 +416,29 @@ async def dispatch(key: str, task: str, roles: list[str] | None = None) -> Async
     errors: dict[str, str] = {}
     ok = failed = waves_run = 0
 
+    def route(a: dict) -> tuple[str | None, str | None, str]:
+        """Where this agent runs, which model it gets there, and why.
+
+        Provider first, model second. An imager only counts as wanting image generation
+        if a provider that can do it is actually up; otherwise it is a text agent writing
+        a generation prompt, and routes on the weight of that text like anything else.
+        """
+        t = agents.BY_ID[a["role"]]
+        wants_image = t.kind == "image" and any(
+            agents.family_of(m) == "image" for m in (live - dead)
+        )
+        provider, why = routing.choose(a["role"], a["subtask"], usable - _exhausted(),
+                                       wants_image=wants_image, mode=mode)
+        if not provider:
+            return None, None, why
+        return provider, bound.get(provider, {}).get(a["role"]), why
+
+    def _exhausted() -> set[str]:
+        """Providers with nothing left to bind, so the router stops offering them."""
+        return {p for p in usable if not any(bound.get(p, {}).values())}
+
     def enlist(batch: list[dict]) -> list[dict]:
-        """Give each planned agent a unique id and a model, and start it.
+        """Give each planned agent a unique id, a provider, and a model, and start it.
 
         A slice is the label, which names a deliverable. Keying on the label alone rather
         than on (role, label) is deliberate: planners routinely hand the same deliverable
@@ -344,12 +459,13 @@ async def dispatch(key: str, task: str, roles: list[str] | None = None) -> Async
             attempts[sid] = attempts.get(sid, 0) + 1
             slices[sid] = "running"
             counts[a["role"]] = counts.get(a["role"], 0) + 1
+            provider, model, why = route(a)
             agent = {**a, "id": f"{a['role']}-{counts[a['role']]}",
-                     "model": bound.get(a["role"])}
+                     "provider": provider, "model": model, "route_why": why}
             owner[agent["id"]] = sid
             spawned.append(agent)
             made.append(agent)
-            workers.append(asyncio.create_task(_run_agent(key, agent, queue, sem, outputs)))
+            workers.append(asyncio.create_task(_run_agent(key, agent, queue, sems, outputs)))
         return made
 
     try:
@@ -365,11 +481,23 @@ async def dispatch(key: str, task: str, roles: list[str] | None = None) -> Async
                     why = "roles supplied directly"
                 else:
                     batch, why = await plan(key, task, thinker, min(FIRST_WAVE, remaining))
+                    if thinker:
+                        why = f"{why} · planner on {planner_provider} ({planner_why})"
             else:
                 # A task the planner sized at a single agent is by definition not
                 # multi-part, so if that agent succeeded there is nothing to grow into.
                 # Without this the supervisor invents busywork for one-line questions.
                 if len(spawned) == 1 and not errors:
+                    break
+
+                # The same reasoning one level up, and the guard that actually bites.
+                # The rule above only fires when the planner produced exactly one agent,
+                # which a weak planner rarely does: asked for a one-line thank-you note,
+                # a local 7B returned two agents, and the supervisor then grew that to
+                # five across four waves — 150s of CPU for a sentence. The task's own
+                # weight is the honest signal here, and it does not depend on the planner
+                # having been any good.
+                if task_weight < routing.THRESHOLD and not errors:
                     break
 
                 # Failures go in too. A supervisor shown only successes reads a failed
@@ -403,6 +531,7 @@ async def dispatch(key: str, task: str, roles: list[str] | None = None) -> Async
             yield _event("wave", n=wave, why=why, agents=[
                 {"id": a["id"], "role": a["role"], "label": a["label"], "model": a["model"],
                  "name": agents.BY_ID[a["role"]].name, "color": agents.BY_ID[a["role"]].color,
+                 "provider": a["provider"], "route_why": a["route_why"],
                  "subtask": a["subtask"][:400]}
                 for a in started
             ])
@@ -438,12 +567,18 @@ async def dispatch(key: str, task: str, roles: list[str] | None = None) -> Async
                     errors[ev["id"]] = ev.get("detail", "")[:200]
                     # The model let us down, not the prompt — drop it and re-bind, so the
                     # next wave reaches for a different one instead of the same dead end.
+                    # Only that model's own provider is re-bound; a NIM model going dark
+                    # says nothing about what Ollama can serve.
                     if ev.get("model_at_fault") and ev.get("model"):
                         dead.add(ev["model"])
-                        bound = rebind()
-                        thinker = agents.pick_planner(live - dead) or thinker
-                        swapped = {r: m for r, m in bound.items() if m and m not in dead}
-                        yield _event("rebind", dropped=ev["model"], bindings=swapped)
+                        hurt = providers.provider_of(ev["model"])
+                        if hurt in bound:
+                            bound[hurt] = rebind(hurt)
+                        thinker = agents.pick_planner(live - dead, planner_provider) or thinker
+                        swapped = {f"{p}/{r}": m for p, table in bound.items()
+                                   for r, m in table.items() if m and m not in dead}
+                        yield _event("rebind", dropped=ev["model"], provider=hurt,
+                                     bindings=swapped)
     except (asyncio.TimeoutError, asyncio.CancelledError):
         pass
     finally:
@@ -451,4 +586,9 @@ async def dispatch(key: str, task: str, roles: list[str] | None = None) -> Async
             w.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
 
-    yield _event("complete", agents=len(spawned), waves=waves_run, ok=ok, failed=failed)
+    used: dict[str, int] = {}
+    for a in spawned:
+        if a.get("provider"):
+            used[a["provider"]] = used.get(a["provider"], 0) + 1
+    yield _event("complete", agents=len(spawned), waves=waves_run, ok=ok, failed=failed,
+                 by_provider=used)

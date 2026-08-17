@@ -13,12 +13,19 @@ finds one of those — so the same code works on a key with 102 models and a key
 Being listed is not the same as being served: most catalogued models 404, and some accept
 a request and never reply. That is why `bind()` wants a verified set rather than trusting
 the catalog; `octopus.catalog()` produces it.
+
+Model ids arriving here are qualified — 'nvidia:meta/llama-3.3-70b-instruct',
+'local:qwen2.5:7b'. Every tentacle carries candidate names for both providers in one
+list, because binding is always scoped to a provider the router has already chosen
+(`bind(..., provider=...)`), so names belonging to the other one simply cannot match.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+
+import providers
 
 # --- catalog classification -------------------------------------------------
 # Ordered: the first pattern that matches an ID wins, so 'coder' beats generic 'chat'.
@@ -66,6 +73,13 @@ def classify(model_ids: list[str]) -> dict[str, list[str]]:
     return grouped
 
 
+def for_provider(model_ids: list[str], name: str | None) -> list[str]:
+    """Narrow a qualified-id pool to one provider. `None` means no narrowing."""
+    if not name:
+        return list(model_ids)
+    return [m for m in model_ids if providers.provider_of(m) == name]
+
+
 # --- tentacles --------------------------------------------------------------
 
 
@@ -95,7 +109,10 @@ TENTACLES: list[Tentacle] = [
         candidates=["palmyra-creative", "gpt-oss-120b", "nemotron-3-super", "step-3.7",
                     "muse-glimmer", "inkling", "kimi-k2", "glm-5", "llama-3.3-70b",
                     "llama-3.1-405b", "llama-3.1-70b", "mixtral-8x22b", "nemotron-4-340b",
-                    "qwen2.5-72b", "llama-3.1-8b"],
+                    "qwen2.5-72b", "llama-3.1-8b",
+                    # Local. Only reachable when the pool is scoped to the local provider,
+                    # so their position after the hosted names costs nothing.
+                    "qwen2.5", "llama3.2", "mistral", "phi"],
         fallback_families=["chat", "reasoning"],
         system=("You are a writing specialist. Produce finished prose, not an outline of prose. "
                 "Match the register the request implies. No preamble, no 'here is'; open with the "
@@ -112,7 +129,10 @@ TENTACLES: list[Tentacle] = [
                   "stack trace", "class", "endpoint"],
         candidates=["qwen3-coder", "qwen2.5-coder-32b", "codestral", "deepseek-coder",
                     "laguna", "codellama-70b", "granite-34b-code", "starcoder2",
-                    "gpt-oss-120b", "nemotron-3-super", "deepseek-r1", "llama-3.3-70b"],
+                    "gpt-oss-120b", "nemotron-3-super", "deepseek-r1", "llama-3.3-70b",
+                    # Local: a pulled coder model wins if there is one, else the general
+                    # 7B, which handles a short function better than the 3B does.
+                    "qwen2.5-coder", "deepseek-coder-v2", "codellama", "qwen2.5", "llama3.2"],
         fallback_families=["code", "reasoning", "chat"],
         system=("You are a software engineer. Give working code first, then a short note on the "
                 "non-obvious parts only. Always name the language in the fence. State assumptions "
@@ -131,7 +151,10 @@ TENTACLES: list[Tentacle] = [
         # here — the latter wrap their answer in <think> and break the parse.
         candidates=["llama-3.1-8b", "gpt-oss-20b", "step-3.7-flash", "llama-3.3-70b",
                     "llama-3.1-70b", "mistral-large", "nemotron-3.5-lightning",
-                    "nemotron-mini"],
+                    "nemotron-mini",
+                    # Local: same reasoning as above — a small instruction-follower emits
+                    # cleaner JSON here than a bigger model that likes to explain itself.
+                    "llama3.2", "qwen2.5", "mistral"],
         fallback_families=["chat", "reasoning"],
         system=("You are a planning specialist. Respond with ONLY a JSON object, no prose and no "
                 "Markdown fences, shaped: "
@@ -170,7 +193,9 @@ TENTACLES: list[Tentacle] = [
                   "estimate", "forecast", "investigate"],
         candidates=["nemotron-3-ultra", "deepseek-r1", "qwq-32b", "nemotron-ultra",
                     "llama-3.3-nemotron-super-49b", "gpt-oss-120b", "nemotron-3-super",
-                    "nemotron-70b", "magistral", "llama-3.3-70b"],
+                    "nemotron-70b", "magistral", "llama-3.3-70b",
+                    # Local: the 7B first — analysis is where the 3B's ceiling shows.
+                    "qwen2.5", "llama3.2", "mistral"],
         fallback_families=["reasoning", "chat"],
         system=("You are an analyst. Lead with the conclusion, then the reasoning that supports it. "
                 "Quantify where the input allows and say plainly where it does not. Name the "
@@ -232,14 +257,21 @@ def shortlist(t: Tentacle, model_ids: list[str], limit: int = 8) -> list[tuple[s
     return out[:limit]
 
 
-def bind(model_ids: list[str], live: set[str] | None = None) -> list[dict]:
+def bind(model_ids: list[str], live: set[str] | None = None,
+         provider: str | None = None) -> list[dict]:
     """Attach a model to every tentacle. Returns a report of what got bound and how.
 
     `live` is the set of models confirmed to actually answer. Pass it whenever you can:
     the catalog happily lists models that 404, and worse, models that accept a request
     and never reply. Without it this falls back to trusting the catalog.
+
+    `provider` narrows the pool to one place before any of that happens. The router
+    decides where an agent's work should go, and this decides which model there does it —
+    keeping the two separate is what stops a 'route this locally' decision from quietly
+    binding to a hosted model because the hosted one ranked higher.
     """
     report = []
+    model_ids = for_provider(model_ids, provider)
     grouped = classify(model_ids)
     for t in TENTACLES:
         chosen, how = None, "nothing entitled"
@@ -264,6 +296,7 @@ def bind(model_ids: list[str], live: set[str] | None = None) -> list[dict]:
         report.append({
             "id": t.id, "name": t.name, "color": t.color, "blurb": t.blurb,
             "model": chosen, "bound_via": how, "kind": t.kind,
+            "provider": providers.provider_of(chosen) if chosen else provider,
             "ready": chosen is not None,
             "generates_images": t.kind == "image" and chosen is not None
                                 and family_of(chosen) == "image",
@@ -338,16 +371,20 @@ PLANNER_PREFERENCE = [
     "nemotron-3-super", "gpt-oss-120b", "llama-3.3-70b", "mistral-large",
     "nemotron-3.5-lightning", "step-3.7-flash", "gpt-oss-20b", "nemotron-3-ultra",
     "llama-3.1-70b", "llama-3.1-8b",
+    # Local, for when nothing hosted is reachable. The 7B first: the 3B plans a
+    # two-part task into six agents, and every one of those costs a completion.
+    "qwen2.5", "mistral", "llama3.2",
 ]
 
 
-def pick_planner(live: set[str]) -> str | None:
+def pick_planner(live: set[str], provider: str | None = None) -> str | None:
     """Best available model for planning and supervision, or None if nothing is usable."""
+    pool = set(for_provider(sorted(live), provider))
     for pref in PLANNER_PREFERENCE:
-        matches = sorted((m for m in live if pref in m.lower()), key=len)
+        matches = sorted((m for m in pool if pref in m.lower()), key=len)
         if matches:
             return matches[0]
-    return next((m for m in sorted(live) if not is_utility(m)), None)
+    return next((m for m in sorted(pool) if not is_utility(m)), None)
 
 
 def role_for_text(text: str) -> str:
