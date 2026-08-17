@@ -38,7 +38,8 @@ flowchart TB
     subgraph outside["Model hosts"]
         LOCAL["Ollama<br/>127.0.0.1:11434<br/><b>free · offline · slow</b>"]
         NIM["NVIDIA NIM<br/>integrate.api.nvidia.com<br/><b>free tier · large · quota'd</b>"]
-        FUTURE["OpenAI · Anthropic<br/><i>registered, disabled</i>"]
+        GEM["Google Gemini<br/>generativelanguage.googleapis.com<br/><b>free tier · large · quota'd</b>"]
+        FUTURE["OpenAI · Anthropic<br/><i>registered, disabled — paid</i>"]
     end
 
     UI --> API --> OCT
@@ -47,6 +48,7 @@ flowchart TB
     OCT --> PROV
     PROV --> LOCAL
     PROV --> NIM
+    PROV --> GEM
     PROV -.-> FUTURE
 
     classDef off fill:#eee,stroke:#999,color:#666,stroke-dasharray:4 3
@@ -75,8 +77,8 @@ flowchart TB
     R3 --> R4["± request length<br/>and listed requirements"]
     R4 --> SC{"score ≥ 0.55?"}
 
-    SC -->|"no — light"| L["prefer <b>local</b>"]
-    SC -->|"yes — heavy"| H["prefer <b>nvidia</b>"]
+    SC -->|"no — light"| L["prefer <b>prefers=small</b><br/><i>local</i>"]
+    SC -->|"yes — heavy"| H["prefer <b>prefers=large</b><br/><i>nvidia, then gemini</i>"]
 
     L --> AV{"preferred<br/>provider up?"}
     H --> AV
@@ -89,11 +91,15 @@ flowchart TB
     IMG["imager, with an image model live"] -.->|"capability, not preference"| H
 ```
 
-Availability always wins over preference. Stop Ollama and every agent goes to NIM;
-remove the key and everything runs on this machine — neither case has a code path of its
-own, they just fall out of `usable`.
+Availability always wins over preference. Stop Ollama and every agent goes to a hosted
+provider; remove every key and everything runs on this machine — neither case has a code
+path of its own, they just fall out of `usable`.
 
-Two escapes from `auto`: `OCTOPUS_ROUTE=local|nvidia` pins a whole run, and
+Ordering inside each branch comes from the registry (`prefers`, then `priority`), not
+from names written into the router, so a provider added later slots in rather than
+landing at the back.
+
+Two escapes from `auto`: `OCTOPUS_ROUTE=<provider>` pins a whole run, and
 `POST /api/route` dry-runs the decision for a subtask so you can see the score before
 changing the threshold.
 
@@ -115,7 +121,7 @@ sequenceDiagram
 
     U->>O: POST /api/dispatch {task}
     O->>C: merged catalog
-    Note over C: NIM: probe every candidate<br/>Local: trusted — Ollama only<br/>lists what is on disk
+    Note over C: NIM: probe every candidate<br/>Local, Gemini: trusted — they list<br/>only what they will serve
     C-->>O: qualified ids + verified set
     O-->>U: event: providers
 
@@ -159,21 +165,30 @@ anyone, so a bogus key gets a clean `200` and a hundred model names. Providers t
 a credential spend one extra one-token completion proving it, which is why a bad key
 shows up as `bad key` at startup instead of as every agent failing `403` later.
 
-| | local | nvidia |
-|---|---|---|
-| Key | none | `NVIDIA_API_KEY` |
-| Catalog | trusted | probed model by model |
-| Read timeout | 300 s (cold load) | 45 s (fail fast) |
-| Token cap | 700 | role default (1400–2000) |
-| Parallelism | 2 (shares this CPU) | 6 |
-| Gets | light work | heavy work, image generation, planning |
+| | local | nvidia | gemini |
+|---|---|---|---|
+| Key | none | `NVIDIA_API_KEY` | `GEMINI_API_KEY` |
+| Catalog | trusted | probed model by model | trusted |
+| Read timeout | 300 s (cold load) | 45 s (fail fast) | 60 s |
+| Token cap | 700 | role default (1400–2000) | role default |
+| Parallelism | 2 (shares this CPU) | 6 | 6 |
+| `prefers` / `priority` | small / 0 | large / 10 | large / 20 |
+| Gets | light work | heavy work, image generation, planning | heavy work, planning |
+
+NIM is the only one whose catalog is probed. It is the anomaly, not the rule: Ollama
+lists what is on disk and Gemini lists what it will serve, so probing either spends time
+or free-tier quota confirming something already true.
 
 ---
 
 ## Adding a provider
 
-1. Add a row to `PROVIDERS` in `providers.py` — name, base URL, key env var, timeouts.
-2. If it speaks OpenAI's `/chat/completions`, that is the whole job.
+1. Add a row to `PROVIDERS` in `providers.py` — name, base URL, key env var, timeouts,
+   plus `prefers` and `priority` so the router knows where it sits.
+2. If it speaks OpenAI's `/chat/completions`, that is the whole job. Gemini was exactly
+   this: one row, because Google publishes an OpenAI-compatible surface. The only wrinkle
+   was that it answers a bad key with `400` rather than `401`, and that it prefixes listed
+   ids with `models/` — handled by `_is_auth_failure` and `id_prefix` respectively.
 3. If it does not — Anthropic's `/messages` differs in request shape, streaming events
    and auth header — write the adapter at the `_require_openai_wire` seam.
 4. Optionally add its model names to the tentacle `candidates` lists in `agents.py`, and
@@ -183,5 +198,7 @@ Nothing in `octopus.py`, the tentacles, or the UI needs to change: model ids are
 `provider:model` everywhere above the provider layer, and the router degrades to whatever
 is in `usable`.
 
-OpenAI and Anthropic are already registered and disabled. They are off because Octopus is
-deliberately free-resources-only for now — not because the shape does not support them.
+OpenAI and Anthropic are already registered and disabled. They are off because they are
+paid and Octopus is deliberately free-resources-only — not because the shape does not
+support them. Gemini is the proof: it went in as a registry row and a handful of model
+names, with no change to the octopus, the tentacles, or the UI.

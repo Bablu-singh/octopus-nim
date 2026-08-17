@@ -2,7 +2,7 @@
 
 A local multi-agent console. Describe a task; it works out what kind of work it is,
 splits it into as many agents as the task warrants, runs them in parallel, and decides
-for each one whether it should run **on your machine** or **on NVIDIA NIM**.
+for each one whether it should run **on your machine** or **on a hosted free tier**.
 
 **[Live demo →](https://bablu-singh.github.io/octopus-nim/)** — a recorded dispatch,
 replayed. GitHub Pages cannot run the Python backend, so the demo replays a real run
@@ -30,15 +30,15 @@ so the pool grows with the task rather than being fixed when you press Dispatch.
 
 ## Local and hosted, decided per agent
 
-The two providers fail in opposite directions. Local is free, private, offline and never
-rate-limited, but it is CPU inference — a 7B produces maybe ten tokens a second. NIM is
-fast and far larger, but it is a shared free tier with quotas and a network round trip.
-Neither is the right default for everything.
+The providers fail in opposite directions. Local is free, private, offline and never
+rate-limited, but it is CPU inference — a 7B produces maybe ten tokens a second. The
+hosted free tiers (NIM, Gemini) are fast and far larger, but they are shared, quota'd and
+a network round trip away. Neither kind is the right default for everything.
 
 So every agent's subtask is weighed before a model is bound to it. Light work — a short
 email, a definition, a quick read on some numbers — stays on your machine. Heavy work —
-architecture, migrations, anything asking for depth or length — goes to NIM. One dispatch
-routinely splits across both:
+architecture, migrations, anything asking for depth or length — goes to a hosted model.
+One dispatch routinely splits across both:
 
 ```
 WAVE 1
@@ -50,23 +50,38 @@ Scoring is deterministic keyword-and-length work, not a model call: asking a mod
 model should answer would add a round trip to every agent, which on a one-line question
 costs more than simply answering it.
 
-**Availability always beats preference.** Stop Ollama and everything goes to NIM. Delete
-the key and everything runs locally, offline, with no account at all. Neither case has a
-code path of its own — they fall out of which providers are reachable.
+**Availability always beats preference.** Stop Ollama and everything goes to a hosted
+provider. Delete every key and everything runs locally, offline, with no account at all.
+Neither case has a code path of its own — they fall out of which providers are reachable.
 
-Pin a whole run with `OCTOPUS_ROUTE=local` or `=nvidia`, or dry-run the decision for any
-subtask with `POST /api/route` to see the score before you touch the threshold.
+Pin a whole run with `OCTOPUS_ROUTE=local`, `=nvidia` or `=gemini`, or dry-run the
+decision for any subtask with `POST /api/route` to see the score before you touch the
+threshold.
 
-## Extending it
+## Providers
+
+| Provider | Cost | Needs | Status |
+|---|---|---|---|
+| **local** (Ollama) | free, offline | nothing | on |
+| **nvidia** (NIM) | free tier | `NVIDIA_API_KEY` | on when the key is present |
+| **gemini** | free tier | `GEMINI_API_KEY` | on when the key is present |
+| openai | paid | key + `ENABLE_OPENAI=1` | off |
+| anthropic | paid | key + an adapter | off |
+
+All three live providers are free, which is the constraint this project is built to.
+Drop a Gemini key from [aistudio.google.com](https://aistudio.google.com/apikey) into
+`.env` and it joins the rotation on the next restart — no code change, because Google
+publishes an OpenAI-compatible surface and the router derives its ordering from the
+registry rather than from hardcoded names.
+
+OpenAI and Anthropic are registered and **deliberately disabled** — they are paid.
+Enabling OpenAI needs only a key and a flag. Anthropic's `/messages` differs in request
+shape, streaming events and auth header, so it also needs an adapter at the documented
+seam in `providers.py`.
 
 A provider is a base URL, an optional key, and a wire format. Models are addressed as
 `provider:model` everywhere above `providers.py`, so adding one is a row in a registry —
 not a refactor of the octopus, the tentacles, or the UI.
-
-OpenAI and Anthropic are **registered and deliberately disabled**. Octopus is
-free-resources-only for now; those rows exist so that enabling one later is a config
-change. (OpenAI would need only a key. Anthropic's `/messages` differs in request shape,
-streaming events and auth header, so it also needs an adapter at the documented seam.)
 
 ## The part that makes it work
 

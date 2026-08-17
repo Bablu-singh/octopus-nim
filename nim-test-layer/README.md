@@ -1,7 +1,8 @@
 # Octopus — test layer and agent console
 
-A local wrapper around two model providers — an **Ollama server on this machine** and the
-**NVIDIA NIM API** (`build.nvidia.com`) — so you can verify a key, list reachable models,
+A local wrapper around several model providers — an **Ollama server on this machine**,
+the **NVIDIA NIM API** (`build.nvidia.com`) and **Google Gemini**, all of which have a
+free tier — so you can verify a key, list reachable models,
 and fire prompts without pasting the key into a browser page or hitting CORS. The key
 stays in `.env` on your machine; the browser only ever talks to `127.0.0.1`.
 
@@ -91,20 +92,24 @@ Every subtask is weighed before a model is bound to it — role baseline, plus d
 ("comprehensive", "migration", "production-ready"), minus brevity cues ("short", "quick",
 "typo"), adjusted for request length and listed requirements. Score `≥ 0.55` is heavy.
 
-| | local | nvidia |
-|---|---|---|
-| Key | none | `NVIDIA_API_KEY` |
-| Catalog | trusted (Ollama lists only what is on disk) | probed model by model |
-| Read timeout | 300 s — a cold 7B loads from disk first | 45 s — fail fast |
-| Token cap | 700 (`LOCAL_MAX_TOKENS`) | role default, 1400–2000 |
-| Parallelism | 2 (`OCTOPUS_LOCAL_PARALLEL`) — shares this CPU | 6 (`OCTOPUS_MAX_PARALLEL`) |
-| Gets | light work | heavy work, image generation, planning |
+| | local | nvidia | gemini |
+|---|---|---|---|
+| Key | none | `NVIDIA_API_KEY` | `GEMINI_API_KEY` |
+| Catalog | trusted — lists only what is on disk | probed model by model | trusted — lists what it serves |
+| Read timeout | 300 s — a cold 7B loads from disk | 45 s — fail fast | 60 s |
+| Token cap | 700 (`LOCAL_MAX_TOKENS`) | role default, 1400–2000 | role default |
+| Parallelism | 2 (`OCTOPUS_LOCAL_PARALLEL`) | 6 (`OCTOPUS_MAX_PARALLEL`) | 6 |
+| Gets | light work | heavy work, image generation, planning | heavy work, planning |
+
+Order within a branch is not hardcoded: each provider declares `prefers` (`small`/`large`)
+and `priority` in `providers.py`, and the router reads that — so adding a key adds a
+destination without touching `routing.py`.
 
 Planning and supervision are never weighed: they always take the strongest provider that
 is up, because a small model sizes a pool badly and every extra agent it invents costs a
 completion.
 
-Availability beats preference — with one provider down, everything routes to the other.
+Availability beats preference — with a provider down, everything routes to what is left.
 
 ```bash
 # dry-run the decision without dispatching anything
@@ -112,7 +117,16 @@ curl -s localhost:8000/api/route -H 'Content-Type: application/json' \
   -d '{"role":"writer","subtask":"Write a short thank-you note."}' | jq
 ```
 
-Tune with `OCTOPUS_ROUTE` (`auto` | `local` | `nvidia`) and `OCTOPUS_ROUTE_THRESHOLD`.
+Tune with `OCTOPUS_ROUTE` (`auto`, or any provider name to pin a run) and
+`OCTOPUS_ROUTE_THRESHOLD`.
+
+### Adding Gemini
+
+Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey), put
+`GEMINI_API_KEY=...` in `.env`, restart. It appears in `/api/providers` and joins the
+routing rotation — no code change, because Google publishes an OpenAI-compatible surface
+at `/v1beta/openai`. Two quirks are handled in `providers.py`: it answers a rejected key
+with `400` rather than `401`, and it prefixes listed ids with `models/`.
 
 ## Listed is not the same as served
 
@@ -146,8 +160,9 @@ for streaming it is the gap between chunks), and `NIM_PROBE_TIMEOUT`.
 | POST | `/api/chat/stream` | SSE passthrough |
 | POST | `/api/selftest` | All five checks as JSON |
 
-Send `X-NIM-Key` on any of these to override the `.env` key for one call — handy for
-comparing two keys without a restart.
+Send `X-NIM-Key` on any of these to override **NIM's** key for one call — handy for
+comparing two keys without a restart. It applies to NIM alone; every other provider keeps
+reading its own environment variable, so the header cannot hand Google an `nvapi-` string.
 
 Model ids are qualified as `provider:model`. A bare id means NIM, which is what every id
 meant before providers existed, so old scripts keep working.
@@ -175,6 +190,7 @@ curl -s localhost:8000/api/chat -H 'Content-Type: application/json' \
   back. Almost always a listed-but-not-served model rather than a problem with your key.
 - **`bad key` at startup** — the key is present but was rejected. NIM serves its model
   list to anyone, so this is caught by a separate one-token auth probe rather than by the
-  catalog read appearing to succeed.
+  catalog read appearing to succeed. Providers disagree on the status code for this —
+  Gemini says `400`, NIM says `403` — so the body is inspected too.
 
 Never commit `.env` — `.gitignore` already covers it.

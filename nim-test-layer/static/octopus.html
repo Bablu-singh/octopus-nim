@@ -128,8 +128,12 @@
      that two agents on the same screen can have come from completely different places. */
   .card h3 .prov{font-family:var(--mono);font-size:10px;letter-spacing:.08em;
     text-transform:uppercase;border-radius:4px;padding:2px 6px;font-weight:600}
+  /* Unknown providers still render — the neutral .prov styling above is the default,
+     and a new registry row gets a readable chip without touching this file. */
   .prov[data-p="local"]{background:#12313f;color:#8ab4f8;border:1px solid #24506b}
   .prov[data-p="nvidia"]{background:#1b2c0d;color:#a8e63a;border:1px solid #3c5f14}
+  .prov[data-p="gemini"]{background:#2a1c3d;color:#c9a6ff;border:1px solid #4b3170}
+  .prov{background:#132a33;color:var(--muted);border:1px solid var(--ridge)}
   .card h3 .rwhy{font-family:var(--mono);font-size:10.5px;color:var(--muted);opacity:.8;
     flex-basis:100%;margin-top:-2px}
   .card h3 .ms{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted);
@@ -392,8 +396,10 @@ function markDirty(id) {
 }
 
 /* Model ids are qualified — 'local:qwen2.5:7b'. The provider is already a chip of its
-   own next to the name, so repeating it in the model column is just noise. */
-const bare = m => (m || "").replace(/^(local|nvidia|openai|anthropic):/, "");
+   own next to the name, so repeating it in the model column is just noise. Matched by
+   shape rather than by a list of provider names, so a row added to the registry does not
+   have to be added here too — that list had already gone stale once. */
+const bare = m => (m || "").replace(/^[a-z0-9_-]+:(?=.)/, "");
 
 /* ---------- cards ---------- */
 function card(a) {
@@ -548,11 +554,18 @@ $("go").onclick = async () => {
           $("m-time").textContent = secs + "s";
           const split = Object.entries(e.by_provider || {})
             .map(([n, c]) => `${c} ${n}`).join(" + ");
+          // Tokens are estimated (agents stream, so no usage block comes back) and every
+          // provider here is free — so show the count, and only show money once
+          // something billable is actually in the run.
+          const c = e.cost || {};
+          const spend = c.tokens
+            ? ` · ~${c.tokens.toLocaleString()} tok${c.billable ? ` · $${c.usd.toFixed(4)}` : " · free"}`
+            : "";
           $("why").innerHTML = `<span class="tag">complete</span> ` +
             `${e.agents} agent${e.agents === 1 ? "" : "s"} across ${e.waves} ` +
             `wave${e.waves === 1 ? "" : "s"} · ${e.ok} succeeded` +
             (e.failed ? ` · ${e.failed} failed` : "") +
-            (split ? ` · ${split}` : "") + ` · ${secs}s`;
+            (split ? ` · ${split}` : "") + spend + ` · ${secs}s`;
         }
       }
     }

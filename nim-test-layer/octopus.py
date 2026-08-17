@@ -41,6 +41,20 @@ MAX_PARALLEL = int(os.getenv("OCTOPUS_MAX_PARALLEL", "6"))   # concurrent upstre
 LOCAL_PARALLEL = int(os.getenv("OCTOPUS_LOCAL_PARALLEL", "2"))
 DIGEST_CHARS = 700         # per agent, when summarising a wave for the supervisor
 
+# --- cost control ---------------------------------------------------------------
+# Everything reachable today is free, so "cost" here means quota and wall-clock rather
+# than money. The cheapest call is still the one that never happens, which is what these
+# three knobs are for; the ledger then reports what the run actually spent.
+#
+# Below this task weight, wave 1 is planned by keyword instead of by a model. A one-line
+# question does not need a planning completion to work out that it is one agent — and on
+# a trivial task that call is a large fraction of the whole run's cost.
+PLANNER_SKIP_BELOW = float(os.getenv("OCTOPUS_PLANNER_SKIP_BELOW", "0.20"))
+# Hard ceiling on estimated tokens for one dispatch. 0 disables it. Counts every agent
+# plus the planner and supervisor; when it trips, no further agents are enlisted and the
+# ones already running finish normally.
+TOKEN_BUDGET = int(os.getenv("OCTOPUS_TOKEN_BUDGET", "0"))
+
 # Keyed by fingerprint: two different keys have different entitlements, and sharing one
 # cache between them would bind tentacles to models the current key cannot reach.
 _catalog: dict[str, dict] = {}
@@ -165,6 +179,45 @@ def _mark_dead(key: str | None, model: str | None) -> None:
         slot["fetched_at"] = 0.0
 
 
+class Ledger:
+    """What a dispatch spent, per provider.
+
+    Token counts are estimates — see `providers.estimate_tokens`; agents stream, and
+    streaming responses carry no usage block. They are still the only way to compare
+    where a run's budget went, and they are what `TOKEN_BUDGET` is enforced against.
+    """
+
+    def __init__(self) -> None:
+        self.rows: dict[str, dict] = {}
+
+    def add(self, provider: str | None, prompt: str, output: str, calls: int = 1) -> None:
+        if not provider:
+            return
+        p = providers.BY_NAME.get(provider)
+        tin, tout = providers.estimate_tokens(prompt), providers.estimate_tokens(output)
+        row = self.rows.setdefault(
+            provider, {"calls": 0, "tokens_in": 0, "tokens_out": 0, "usd": 0.0,
+                       "free": p.free_tier if p else True})
+        row["calls"] += calls
+        row["tokens_in"] += tin
+        row["tokens_out"] += tout
+        if p:
+            row["usd"] = round(row["usd"] + providers.price(p, tin, tout), 6)
+
+    @property
+    def tokens(self) -> int:
+        return sum(r["tokens_in"] + r["tokens_out"] for r in self.rows.values())
+
+    def report(self) -> dict:
+        return {
+            "by_provider": self.rows,
+            "tokens": self.tokens,
+            "usd": round(sum(r["usd"] for r in self.rows.values()), 6),
+            "billable": any(not r["free"] for r in self.rows.values()),
+            "estimated": True,
+        }
+
+
 def _event(kind: str, **payload) -> str:
     return f"data: {json.dumps({'event': kind, **payload})}\n\n"
 
@@ -269,7 +322,8 @@ async def _generate_image(key: str, model: str, prompt: str) -> dict:
 
 
 async def _run_agent(key: str | None, agent: dict, queue: asyncio.Queue,
-                     sems: dict[str, asyncio.Semaphore], outputs: dict[str, str]) -> None:
+                     sems: dict[str, asyncio.Semaphore], outputs: dict[str, str],
+                     ledger: "Ledger | None" = None) -> None:
     """Run one agent to completion, streaming as it goes.
 
     The model is passed in on the agent dict rather than read off the shared role template,
@@ -324,6 +378,9 @@ async def _run_agent(key: str | None, agent: dict, queue: asyncio.Queue,
                     chunks += 1
                     outputs[aid] += delta
                     await queue.put(_event("chunk", id=aid, text=delta))
+
+            if ledger is not None:
+                ledger.add(prov, t.system + agent["subtask"], outputs[aid])
 
             if chunks == 0:
                 _mark_dead(key, model)
@@ -407,6 +464,7 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
     for name in usable | {"nvidia"}:
         sems.setdefault(name, asyncio.Semaphore(MAX_PARALLEL))
     outputs: dict[str, str] = {}
+    ledger = Ledger()
     workers: list[asyncio.Task] = []
     spawned: list[dict] = []
     counts: dict[str, int] = {}
@@ -424,8 +482,14 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
         a generation prompt, and routes on the weight of that text like anything else.
         """
         t = agents.BY_ID[a["role"]]
-        wants_image = t.kind == "image" and any(
-            agents.family_of(m) == "image" for m in (live - dead)
+        # Only NIM's genai endpoint is implemented in `_generate_image`, so an image
+        # model listed by anyone else does not make this agent a drawing agent. Gemini
+        # lists 'gemini-2.5-flash-image'; binding to it and then posting to NVIDIA's
+        # endpoint would fail, and treating the agent as image-capable when NIM is down
+        # would strand it with no provider at all instead of falling back to prose.
+        wants_image = t.kind == "image" and "nvidia" in usable and any(
+            agents.family_of(m) == "image" and providers.provider_of(m) == "nvidia"
+            for m in (live - dead)
         )
         provider, why = routing.choose(a["role"], a["subtask"], usable - _exhausted(),
                                        wants_image=wants_image, mode=mode)
@@ -453,6 +517,10 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
         for a in batch:
             if len(spawned) >= MAX_AGENTS:
                 break
+            # Agents already running are left alone — cancelling them would spend the
+            # tokens and throw away the answer, which is the opposite of the point.
+            if TOKEN_BUDGET and ledger.tokens >= TOKEN_BUDGET:
+                break
             sid = _slug(a["label"])
             if slices.get(sid) in ("ok", "running") or attempts.get(sid, 0) >= 2:
                 continue
@@ -465,7 +533,8 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
             owner[agent["id"]] = sid
             spawned.append(agent)
             made.append(agent)
-            workers.append(asyncio.create_task(_run_agent(key, agent, queue, sems, outputs)))
+            workers.append(asyncio.create_task(
+                _run_agent(key, agent, queue, sems, outputs, ledger)))
         return made
 
     try:
@@ -479,10 +548,18 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
                     batch = [{"role": r, "label": agents.BY_ID[r].name, "subtask": task}
                              for r in roles if r in agents.BY_ID]
                     why = "roles supplied directly"
+                elif task_weight < PLANNER_SKIP_BELOW:
+                    # The cheapest completion is the one never made. A task this light is
+                    # one agent's work, and paying a planner call to be told so costs more
+                    # than the answer does.
+                    batch = agents.keyword_plan(task, min(FIRST_WAVE, remaining))
+                    why = (f"keyword planning · task weight {task_weight:.2f} below "
+                           f"{PLANNER_SKIP_BELOW:.2f}, planner call skipped to save a completion")
                 else:
                     batch, why = await plan(key, task, thinker, min(FIRST_WAVE, remaining))
                     if thinker:
                         why = f"{why} · planner on {planner_provider} ({planner_why})"
+                    ledger.add(planner_provider, task, "", calls=1)
             else:
                 # A task the planner sized at a single agent is by definition not
                 # multi-part, so if that agent succeeded there is nothing to grow into.
@@ -519,6 +596,7 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
                     if outputs.get(a["id"]) or a["id"] in errors
                 )
                 batch, why = await supervise(key, task, thinker, digest, remaining)
+                ledger.add(planner_provider, digest, "", calls=1)
                 if not batch:
                     break
                 why = why or "supervisor added follow-up agents"
@@ -591,4 +669,4 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
         if a.get("provider"):
             used[a["provider"]] = used.get(a["provider"], 0) + 1
     yield _event("complete", agents=len(spawned), waves=waves_run, ok=ok, failed=failed,
-                 by_provider=used)
+                 by_provider=used, cost=ledger.report())

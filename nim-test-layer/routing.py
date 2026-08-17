@@ -1,17 +1,21 @@
 """Which provider should do this particular piece of work.
 
-The router exists because the two free providers fail in opposite directions. Local is
-free, private, always entitled and never rate-limited, but it is CPU inference: a 7B
-produces maybe ten tokens a second, so a long answer costs minutes. NIM is fast and far
-larger, but it is a shared free tier with quotas, a catalog that lies, and a network
-round trip. Neither is the right default for everything, and asking the user to pick per
-task is asking them to do the router's job.
+The router exists because the free providers fail in opposite directions. Local is free,
+private, always entitled and never rate-limited, but it is CPU inference: a 7B produces
+maybe ten tokens a second, so a long answer costs minutes. The hosted free tiers — NIM,
+Gemini — are fast and far larger, but they are shared, quota'd, a network round trip
+away, and in NIM's case advertise a catalog they cannot serve. Neither kind is the right
+default for everything, and asking the user to pick per task is asking them to do the
+router's job.
 
 So each agent's subtask is weighed before it is bound. Light work — a short email, a
 definition, a quick read on some numbers, the strict-JSON planning calls — goes local,
 where it costs nothing and no quota is spent. Heavy work — architecture, migrations,
-anything asking for depth or length — goes to NIM, where a 70B can actually do it. If
-only one provider is up, everything goes there; that is the fallback, not a failure.
+anything asking for depth or length — goes to a hosted model that can actually do it.
+If only one provider is up, everything goes there; that is the fallback, not a failure.
+
+Which hosted provider is not hardcoded: `rank()` orders whatever is reachable by what
+each declares in the registry, so adding a key adds a destination and nothing else.
 
 Scoring is deterministic keyword-and-length work on purpose. Asking a model which model
 should answer would add a network round trip to every agent, which on a one-line
@@ -23,13 +27,15 @@ from __future__ import annotations
 import os
 import re
 
+import providers
+
 # Above this, work is heavy enough to be worth a big remote model. Tuned so that plain
 # prose and everyday analysis stay local — that is the common case and the one where
 # local latency actually beats the round trip — while anything asking for depth leaves.
 THRESHOLD = float(os.getenv("OCTOPUS_ROUTE_THRESHOLD", "0.55"))
 
-# auto | local | nvidia. 'auto' is the point of this module; the other two are for
-# pinning a run while debugging, or working offline on a plane.
+# 'auto' is the point of this module. Any registered provider name also works as a pin,
+# for working offline on a plane, or for comparing two of them on the same task.
 MODE = os.getenv("OCTOPUS_ROUTE", "auto").strip().lower()
 
 # Where each role sits before the subtask is read. Coding and analysis reward a bigger
@@ -107,6 +113,36 @@ def weigh(subtask: str, role: str) -> tuple[float, str]:
     return score, ", ".join(reasons)
 
 
+def rank(usable: set[str], heavy: bool) -> list[str]:
+    """Reachable providers, best first, for a decision of this weight.
+
+    Derived from the registry rather than named here. This used to be the literal list
+    ['nvidia', 'local'], which was fine while those were the only two but silently sent
+    every later provider to the back — a free Gemini key would have ranked below a
+    stopped Ollama. A provider now declares what kind of work it wants (`prefers`), what
+    it charges, and how it ties against its peers (`priority`), and the router reads that.
+
+    Order of tie-breaks: right size, then free before paid, then cheaper before dearer,
+    then declared priority.
+    """
+    def key(name: str) -> tuple[int, int, float, int, str]:
+        p = providers.BY_NAME.get(name)
+        pref = p.prefers if p else "any"
+        want = "large" if heavy else "small"
+        # Exact match first, then the undeclared middle, then the opposite end — which
+        # is still reachable, because a wrong-sized provider beats no provider at all.
+        klass = 0 if pref == want else (1 if pref == "any" else 2)
+        # Then cost. Free before paid, and cheaper before dearer, so enabling a paid
+        # provider adds a fallback rather than quietly becoming the default destination
+        # for every heavy agent. Among today's providers this is a no-op — they are all
+        # free — which is exactly why it has to be encoded rather than assumed.
+        paid = 0 if (p is None or p.free_tier) else 1
+        rate = p.usd_out if p else 0.0
+        return (klass, paid, rate, p.priority if p else 50, name)
+
+    return sorted(usable, key=key)
+
+
 def choose(role: str, subtask: str, usable: set[str], *,
            wants_image: bool = False, mode: str | None = None) -> tuple[str | None, str]:
     """Pick a provider for one agent. Returns (provider name, why) — or (None, why not).
@@ -130,18 +166,15 @@ def choose(role: str, subtask: str, usable: set[str], *,
             return "nvidia", "image generation — only NIM has image models"
         return None, "no image-capable provider is reachable"
 
-    if mode in ("local", "nvidia"):
+    if mode and mode != "auto":
         if mode in usable:
             return mode, f"pinned to {mode} by OCTOPUS_ROUTE"
-        other = next(iter(sorted(usable)))
+        other = rank(usable, heavy=False)[0]
         return other, f"{mode} pinned but unreachable — fell back to {other}"
 
     score, why = weigh(subtask, role)
     heavy = score >= THRESHOLD
-    order = ["nvidia", "local"] if heavy else ["local", "nvidia"]
-    # Providers the registry knows about but that this ordering does not name — a future
-    # openai row, say — sit behind the two named ones rather than being unreachable.
-    order += sorted(usable - set(order))
+    order = rank(usable, heavy)
 
     for name in order:
         if name in usable:
@@ -162,10 +195,10 @@ def choose_planner(usable: set[str], mode: str | None = None) -> tuple[str | Non
     available and only drops local when nothing else is up.
     """
     mode = (mode or MODE).strip().lower()
-    if mode in ("local", "nvidia") and mode in usable:
+    if mode and mode != "auto" and mode in usable:
         return mode, f"pinned to {mode}"
-    for name in ("nvidia", "local"):
-        if name in usable:
-            return name, ("strongest available — planning quality sets the whole run"
-                          if name == "nvidia" else "only provider up")
-    return (next(iter(sorted(usable))), "only provider up") if usable else (None, "nothing up")
+    order = rank(usable, heavy=True)
+    if not order:
+        return None, "nothing up"
+    return order[0], ("strongest available — planning quality sets the whole run"
+                      if len(order) > 1 else "only provider up")

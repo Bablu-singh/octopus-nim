@@ -6,23 +6,30 @@ rather than by bare name. That is the whole extension seam — adding GPT or Cla
 is a row in `PROVIDERS` plus, for Claude, an adapter for its non-OpenAI wire format.
 Nothing in the octopus, the tentacles, or the UI has to learn about it.
 
-Two providers are live today, and they are deliberately the two that cost nothing:
+Three providers are live today, and they are deliberately the three that cost nothing:
 
   local   Ollama — or any OpenAI-compatible server — on this machine. No key, no
           network, no quota, no catalog that lies. Slow, because it is CPU inference,
           but always entitled.
   nvidia  build.nvidia.com. Free tier, models far larger than anything that fits in
           local RAM, but a catalog that advertises models it cannot serve.
+  gemini  aistudio.google.com. Free tier, large models, and an OpenAI-compatible
+          surface — which is why it is a ten-line row rather than an adapter.
+
+Each becomes usable only when its credential is present, so the set of providers is
+whatever the machine can actually reach today. Missing keys are a state, not an error.
 
 openai and anthropic are registered and disabled. They are here so the shape is visible
 and so enabling one later is a config change rather than a refactor — not because the
-app can use them. Keeping to free resources is a deliberate choice, not an oversight.
+app can use them. Keeping to free resources is a deliberate choice, not an oversight,
+and it is why Gemini is enabled above while those two are not.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -97,6 +104,20 @@ class Provider:
     max_tokens_cap: int | None = None
     # Ranked hint for the router, not a hard rule: see routing.py.
     prefers: str = "any"           # 'small' | 'large' | 'any'
+    # Tie-break within a `prefers` class, lowest first. Two providers can both be the
+    # right *kind* of place for a piece of work; this says which to try first.
+    priority: int = 50
+    # Stripped from ids this provider lists. Gemini's OpenAI-compatible endpoint returns
+    # 'models/gemini-2.5-flash' but accepts the bare name, and carrying the prefix around
+    # would put a second slash-path inside an id that is already 'provider:model'.
+    id_prefix: str = ""
+    # Price per million tokens, for the ledger. Zero is the honest number for a free
+    # tier and for local inference — the real cost there is quota and wall-clock, which
+    # is what `free_tier` and the token counts are for. Set these when enabling a paid
+    # provider; leaving them at zero would silently report a paid run as free.
+    usd_in: float = 0.0
+    usd_out: float = 0.0
+    free_tier: bool = True
     # One cheap model used only to prove a credential works; see `_key_works`.
     probe_model: str = ""
     key_override: str | None = field(default=None, repr=False)
@@ -149,8 +170,14 @@ class Provider:
     def cap(self, max_tokens: int) -> int:
         return min(max_tokens, self.max_tokens_cap) if self.max_tokens_cap else max_tokens
 
+    def normalize(self, model: str) -> str:
+        """A listed id as this provider's own /chat/completions wants to receive it."""
+        if self.id_prefix and model.startswith(self.id_prefix):
+            return model[len(self.id_prefix):]
+        return model
+
     def qualify(self, model: str) -> str:
-        return f"{self.name}{SEP}{model}"
+        return f"{self.name}{SEP}{self.normalize(model)}"
 
 
 # --- registry ---------------------------------------------------------------
@@ -162,9 +189,21 @@ def _f(env: str, default: float) -> float:
         return default
 
 
+def _on(name: str, default: str = "1") -> bool:
+    """Is this provider switched on? `ENABLE_NVIDIA=0` turns one off without code changes.
+
+    The point is the day a free tier stops being free. Flip the flag and that provider
+    leaves `usable`; the router already treats `usable` as the only truth, so every agent
+    silently goes somewhere else and the app keeps working exactly as before. Nothing
+    needs to be uninstalled, no key needs deleting, and flipping it back is one restart.
+    """
+    return os.getenv(f"ENABLE_{name.upper()}", default) != "0"
+
+
 PROVIDERS: list[Provider] = [
     Provider(
         name="local",
+        enabled=_on("local", "1"),
         label="Local",
         base_url=os.getenv("LOCAL_BASE_URL", "http://127.0.0.1:11434/v1"),
         key_env=None,
@@ -179,9 +218,11 @@ PROVIDERS: list[Provider] = [
         probe_timeout=_f("LOCAL_PROBE_TIMEOUT", 180),
         max_tokens_cap=int(os.getenv("LOCAL_MAX_TOKENS", "700")),
         prefers="small",
+        priority=0,
     ),
     Provider(
         name="nvidia",
+        enabled=_on("nvidia", "1"),
         label="NVIDIA NIM",
         base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
         key_env="NVIDIA_API_KEY",
@@ -196,6 +237,32 @@ PROVIDERS: list[Provider] = [
         probe_timeout=_f("NIM_PROBE_TIMEOUT", 12),
         probe_model=os.getenv("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct"),
         prefers="large",
+        priority=10,
+    ),
+    Provider(
+        name="gemini",
+        enabled=_on("gemini", "1"),
+        label="Google Gemini",
+        # Google publishes an OpenAI-compatible surface alongside its native API. That is
+        # the whole reason this row is ten lines and not an adapter: same /models, same
+        # /chat/completions, same bearer token.
+        base_url=os.getenv("GEMINI_BASE_URL",
+                           "https://generativelanguage.googleapis.com/v1beta/openai"),
+        key_env="GEMINI_API_KEY",
+        tier="free-api",
+        blurb="Free tier at aistudio.google.com. Large models, honest catalog, quota'd.",
+        # Unlike NIM, Gemini lists what it will actually serve, so probing every candidate
+        # would spend free-tier requests confirming something already true — and a 429
+        # part-way through would mark healthy models dead. NIM is the anomaly here, not
+        # the rule. A model that does fail is still dropped mid-run by `_mark_dead`.
+        trust_catalog=os.getenv("GEMINI_TRUST_CATALOG", "1") != "0",
+        connect_timeout=_f("GEMINI_CONNECT_TIMEOUT", 10),
+        read_timeout=_f("GEMINI_READ_TIMEOUT", 60),
+        probe_timeout=_f("GEMINI_PROBE_TIMEOUT", 20),
+        probe_model=os.getenv("GEMINI_MODEL", "gemini-flash-latest"),
+        id_prefix="models/",
+        prefers="large",
+        priority=20,
     ),
     Provider(
         name="openai",
@@ -204,9 +271,11 @@ PROVIDERS: list[Provider] = [
         key_env="OPENAI_API_KEY",
         tier="paid",
         blurb="Same wire format as the two above — needs only a key and this row enabled.",
-        enabled=os.getenv("ENABLE_OPENAI", "0") == "1",
+        enabled=_on("openai", "0"),
+        free_tier=False,
         disabled_note="Disabled: paid. Octopus is deliberately free-resources-only for now.",
         prefers="large",
+        priority=30,
     ),
     Provider(
         name="anthropic",
@@ -216,9 +285,11 @@ PROVIDERS: list[Provider] = [
         tier="paid",
         blurb="Different wire format (/messages, x-api-key). Needs an adapter, not just a key.",
         wire="anthropic",
-        enabled=os.getenv("ENABLE_ANTHROPIC", "0") == "1",
+        enabled=_on("anthropic", "0"),
+        free_tier=False,
         disabled_note="Disabled: paid, and its wire format needs an adapter first.",
         prefers="large",
+        priority=40,
     ),
 ]
 
@@ -296,6 +367,23 @@ def _raise_for_status(resp: httpx.Response, body: str, p: Provider) -> None:
 # --- calls ------------------------------------------------------------------
 
 
+# Providers disagree about which status a rejected credential deserves. NIM and OpenAI
+# send 401/403; Google's OpenAI-compatible surface sends 400 "Please pass a valid API
+# key". Reading that 400 as "the host is down" would tell the user to check their network
+# when the real problem is the key, so the body gets a look before that conclusion.
+_AUTH_WORDS = re.compile(
+    r"api[ _-]?key|credential|unauthenticated|unauthorized|permission denied|"
+    r"invalid.{0,20}key|expired.{0,20}token", re.I)
+
+
+def _is_auth_failure(status: int, body: str) -> bool:
+    if status in (401, 403):
+        return True
+    # A 400 is ambiguous in general, but on a bare GET /models there is no request body
+    # to have malformed, so an auth-shaped message is the only sensible reading.
+    return status == 400 and bool(_AUTH_WORDS.search(body or ""))
+
+
 async def _key_works(p: Provider, client: httpx.AsyncClient) -> bool:
     """Prove the credential, because a successful catalog read does not.
 
@@ -304,8 +392,9 @@ async def _key_works(p: Provider, client: httpx.AsyncClient) -> bool:
     403 several seconds later. So a provider that takes a credential spends one
     one-token completion proving it.
 
-    Only 401 and 403 count against the key. A 404 means the probe model is not entitled
-    to this account, which says nothing at all about whether the key is valid.
+    Only auth-shaped failures count against the key — see `_is_auth_failure`, which has
+    to cope with providers disagreeing about the status code. A 404 means the probe model
+    is not entitled to this account, which says nothing about whether the key is valid.
     """
     if not p.probe_model:
         return True
@@ -315,7 +404,7 @@ async def _key_works(p: Provider, client: httpx.AsyncClient) -> bool:
     try:
         resp = await client.post(f"{p.base_url}/chat/completions",
                                  headers=p.headers(), json=body)
-        return resp.status_code not in (401, 403)
+        return not _is_auth_failure(resp.status_code, resp.text)
     except (httpx.HTTPError, ProviderError):
         return False
 
@@ -334,7 +423,7 @@ async def reachable(p: Provider) -> str:
                                                            read=15.0, write=8.0,
                                                            pool=5.0)) as c:
             resp = await c.get(f"{p.base_url}/models", headers=p.headers())
-            if resp.status_code in (401, 403):
+            if _is_auth_failure(resp.status_code, resp.text):
                 return "bad key"
             if resp.status_code >= 400:
                 return "unreachable"
@@ -362,6 +451,7 @@ async def model_ids(p: Provider) -> list[str]:
     """Qualified ids for everything this provider lists."""
     result = await list_models(p)
     return sorted(p.qualify(m["id"]) for m in result.data.get("data", []) if m.get("id"))
+
 
 
 async def is_alive(p: Provider, model: str, client: httpx.AsyncClient | None = None) -> bool:
@@ -445,14 +535,23 @@ async def chat_stream(model: str, prompt: str, system: str | None = None,
         raise transport_error(err, p, model) from err
 
 
-def with_key(p: Provider, key: str | None) -> Provider:
+# The console override arrives on the X-NIM-Key header, so it is NVIDIA's credential and
+# nobody else's. Before this was pinned down, a key meant for NIM was being applied to
+# every keyed provider — which handed Google an nvapi- string and got back "bad key" for
+# a provider the user had never configured.
+KEY_OWNER = "nvidia"
+
+
+def with_key(p: Provider, key: str | None, owner: str = KEY_OWNER) -> Provider:
     """A copy of a provider using a caller-supplied key, for keys pasted into the console.
 
     Copied rather than mutated: the registry is module-level and shared across requests,
     so writing a key into it would leak one browser session's credential into every
-    other request in the process.
+    other request in the process — and, now that there is more than one keyed provider,
+    into a provider it was never meant for. Hence `owner`: an override applies to exactly
+    one provider, and every other provider keeps reading its own environment variable.
     """
-    if not key or not p.needs_key:
+    if not key or not p.needs_key or p.name != owner:
         return p
     return replace(p, key_override=key)
 
@@ -463,6 +562,21 @@ def extract_text(payload: dict) -> str:
         return payload["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError):
         return ""
+
+
+# Rough, and deliberately so. Providers report real usage only on non-streaming calls,
+# and every agent here streams. Four characters per token is the usual English rule of
+# thumb and is close enough to compare providers within one run — which is what the
+# ledger is for. It is labelled an estimate everywhere it surfaces.
+CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, len(text or "") // CHARS_PER_TOKEN)
+
+
+def price(p: Provider, tokens_in: int, tokens_out: int) -> float:
+    return (tokens_in * p.usd_in + tokens_out * p.usd_out) / 1_000_000
 
 
 def key_fingerprint(key: str) -> str:
@@ -507,7 +621,8 @@ async def survey(key_override: str | None = None, force: bool = False) -> list[d
     out = []
     for p in PROVIDERS:
         if not p.enabled:
-            state, note = "disabled", p.disabled_note
+            state = "disabled"
+            note = p.disabled_note or f"Switched off — set ENABLE_{p.name.upper()}=1 to use it."
         elif not has_key(p):
             state, note = "no key", f"Set {p.key_env} in .env."
         elif p.wire != "openai":

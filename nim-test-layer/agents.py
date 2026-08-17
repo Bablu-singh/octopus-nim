@@ -15,9 +15,10 @@ a request and never reply. That is why `bind()` wants a verified set rather than
 the catalog; `octopus.catalog()` produces it.
 
 Model ids arriving here are qualified — 'nvidia:meta/llama-3.3-70b-instruct',
-'local:qwen2.5:7b'. Every tentacle carries candidate names for both providers in one
-list, because binding is always scoped to a provider the router has already chosen
-(`bind(..., provider=...)`), so names belonging to the other one simply cannot match.
+'local:qwen2.5:7b', 'gemini:gemini-2.5-flash'. Every tentacle carries candidate names for
+every provider in one list, because binding is always scoped to a provider the router has
+already chosen (`bind(..., provider=...)`), so names belonging to the others cannot match
+and their ordering relative to each other never matters.
 """
 
 from __future__ import annotations
@@ -48,7 +49,12 @@ FAMILY_PATTERNS: list[tuple[str, str]] = [
 # one-word verdict instead of an answer. Never auto-bind these.
 UTILITY_PATTERN = re.compile(
     r"guard|safety|content-safety|topic-control|reward|embed|rerank|retriev|"
-    r"parse|deplot|nvclip|translate|detector|calibration"
+    r"parse|deplot|nvclip|translate|detector|calibration|"
+    # Gemini lists music, image, video and specialised agent heads alongside its chat
+    # models. They answer /models but are not assistants, and a fallback would happily
+    # bind 'lyria-3-pro' to the analyst and get back silence.
+    r"lyria|imagen|veo-|nano-banana|antigravity|deep-research|robotics|"
+    r"computer-use|native-audio|live-preview|-tts|aqa"
 )
 
 
@@ -110,6 +116,10 @@ TENTACLES: list[Tentacle] = [
                     "muse-glimmer", "inkling", "kimi-k2", "glm-5", "llama-3.3-70b",
                     "llama-3.1-405b", "llama-3.1-70b", "mixtral-8x22b", "nemotron-4-340b",
                     "qwen2.5-72b", "llama-3.1-8b",
+                    # Gemini: the '-latest' aliases first. Google retires dated model
+                    # names — 'gemini-2.0-flash' already 404s with a note pointing at its
+                    # successor — and an alias is the one name that survives that.
+                    "gemini-pro-latest", "gemini-flash-latest", "gemini-2.5-pro",
                     # Local. Only reachable when the pool is scoped to the local provider,
                     # so their position after the hosted names costs nothing.
                     "qwen2.5", "llama3.2", "mistral", "phi"],
@@ -130,6 +140,7 @@ TENTACLES: list[Tentacle] = [
         candidates=["qwen3-coder", "qwen2.5-coder-32b", "codestral", "deepseek-coder",
                     "laguna", "codellama-70b", "granite-34b-code", "starcoder2",
                     "gpt-oss-120b", "nemotron-3-super", "deepseek-r1", "llama-3.3-70b",
+                    "gemini-pro-latest", "gemini-flash-latest", "gemini-2.5-pro",
                     # Local: a pulled coder model wins if there is one, else the general
                     # 7B, which handles a short function better than the 3B does.
                     "qwen2.5-coder", "deepseek-coder-v2", "codellama", "qwen2.5", "llama3.2"],
@@ -152,6 +163,9 @@ TENTACLES: list[Tentacle] = [
         candidates=["llama-3.1-8b", "gpt-oss-20b", "step-3.7-flash", "llama-3.3-70b",
                     "llama-3.1-70b", "mistral-large", "nemotron-3.5-lightning",
                     "nemotron-mini",
+                    # Gemini: flash over pro here for the same reason — this wants a
+                    # short strict-JSON object, not reasoning narrated before the answer.
+                    "gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash",
                     # Local: same reasoning as above — a small instruction-follower emits
                     # cleaner JSON here than a bigger model that likes to explain itself.
                     "llama3.2", "qwen2.5", "mistral"],
@@ -194,6 +208,7 @@ TENTACLES: list[Tentacle] = [
         candidates=["nemotron-3-ultra", "deepseek-r1", "qwq-32b", "nemotron-ultra",
                     "llama-3.3-nemotron-super-49b", "gpt-oss-120b", "nemotron-3-super",
                     "nemotron-70b", "magistral", "llama-3.3-70b",
+                    "gemini-pro-latest", "gemini-flash-latest", "gemini-2.5-pro",
                     # Local: the 7B first — analysis is where the 3B's ceiling shows.
                     "qwen2.5", "llama3.2", "mistral"],
         fallback_families=["reasoning", "chat"],
@@ -371,6 +386,7 @@ PLANNER_PREFERENCE = [
     "nemotron-3-super", "gpt-oss-120b", "llama-3.3-70b", "mistral-large",
     "nemotron-3.5-lightning", "step-3.7-flash", "gpt-oss-20b", "nemotron-3-ultra",
     "llama-3.1-70b", "llama-3.1-8b",
+    "gemini-pro-latest", "gemini-flash-latest", "gemini-2.5-pro",
     # Local, for when nothing hosted is reachable. The 7B first: the 3B plans a
     # two-part task into six agents, and every one of those costs a completion.
     "qwen2.5", "mistral", "llama3.2",
