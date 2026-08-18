@@ -25,7 +25,8 @@ flowchart TB
     subgraph clients["Front doors"]
         UI["static/octopus.html<br/><i>one SSE stream, cards light independently</i>"]
         DC["Discord<br/><i>outbound gateway — no tunnel</i>"]
-        WA["WhatsApp<br/><i>inbound webhook — needs a tunnel</i>"]
+        WA["WhatsApp Cloud API<br/><i>inbound webhook — needs a tunnel</i>"]
+        WQ["WhatsApp QR<br/><i>unofficial — ToS risk</i>"]
     end
 
     subgraph server["FastAPI — app.py"]
@@ -54,6 +55,7 @@ flowchart TB
     UI --> API --> OCT
     WA -->|"signed webhook (inbound)"| API --> BR
     DC <-->|"gateway WebSocket (outbound)"| BR
+    WQ <-->|"WhatsApp Web protocol"| BR
     BR --> OCT
     OCT --> ROUTE
     OCT --> AG
@@ -249,14 +251,22 @@ visible in the transcript when something does go wrong.
 things — a message limit, how bold and italic are spelled, and how to send — plus nothing
 else, so adding a platform is a small job and two platforms cannot drift apart.
 
-| | Discord | WhatsApp |
-|---|---|---|
-| Connection | outbound gateway WebSocket | inbound HTTPS webhook |
-| Needs a public URL | no | yes — `cloudflared` |
-| Setup | bot token + invite link | Meta app, callback, verify token, app secret |
-| Messaging window | none | 24 hours after the user writes first |
-| Message limit | 2000 chars | 4096 chars |
-| Bold | `**two**` | `*one*` |
+| | Discord | WhatsApp Cloud API | WhatsApp QR |
+|---|---|---|---|
+| Connection | outbound gateway | inbound webhook | outbound, WhatsApp Web protocol |
+| Needs a public URL | no | yes — `cloudflared` | no |
+| Setup | bot token + invite | Meta app, callback, secret | scan a QR |
+| Messaging window | none | 24 hours | none |
+| Account risk | none | none | **number can be banned** |
+| Official | yes | yes | **no — violates ToS** |
+| Message limit | 2000 (4096 in embeds) | 4096 | 4096 |
+| Bold | `**two**` | `*one*` | `*one*` |
+
+The QR door exists because it was asked for, and it is off behind two switches — one to
+enable it and one to say the warning was read — because the cost of getting it wrong is
+someone's personal WhatsApp account rather than a key that can be rotated. Its session
+database is a credential in the same sense a private key is: whoever holds it is that
+WhatsApp account.
 
 Discord is the one to reach for. The direction of the connection is the whole reason:
 nothing has to be exposed for an outbound socket, so there is no tunnel, no signature to

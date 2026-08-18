@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+
+# WhatsApp QR: linked-device credentials and a live pairing code. Both are secrets.
+wa_session.sqlite3*
+wa_qr.png

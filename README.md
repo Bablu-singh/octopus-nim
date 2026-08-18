@@ -115,8 +115,13 @@ for**: its gateway is an outbound WebSocket, so there is no public URL, no tunne
 webhook signature and no inbound port — the app dials out. Setup is a bot token and an
 invite link, and it works from the Discord mobile app.
 
-WhatsApp is also supported, but needs a Meta app, a publicly reachable HTTPS callback via
-`cloudflared`, a signed webhook and a 24-hour messaging window.
+WhatsApp is supported two ways, neither as clean:
+
+- **Cloud API** — official, no account risk, but needs a Meta app, a `cloudflared` tunnel,
+  a signed webhook and a 24-hour messaging window.
+- **QR scan** — no Meta account at all, links like WhatsApp Web. But it drives an
+  unofficial client, which **violates WhatsApp's terms and can get the phone number
+  banned**. Off by default behind two separate switches. Use a spare number.
 
 ```
 you  ▸ draft a release note for v2 and list the migration risks

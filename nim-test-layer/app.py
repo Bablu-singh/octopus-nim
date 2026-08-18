@@ -29,6 +29,7 @@ import discordbot
 import providers
 import routing
 import wa_bridge
+import wa_qr
 import web
 import whatsapp
 
@@ -69,6 +70,14 @@ async def lifespan(_: FastAPI):
     ok, why = discordbot.configured()
     say(f"discord: {'starting' if ok else 'off'} — {why}")
     discordbot.launch()
+
+    # QR-linked WhatsApp. Off unless two separate switches are set, because the risk it
+    # carries is to the user's own phone number rather than to a revocable key.
+    ok, why = wa_qr.configured()
+    say(f"whatsapp-qr: {'starting' if ok else 'off'} — {why}")
+    if ok:
+        say(f"whatsapp-qr: {wa_qr.WARNING}")
+    wa_qr.launch()
 
     try:
         yield
@@ -284,6 +293,27 @@ async def whatsapp_health() -> dict:
         "allowed_numbers": len(whatsapp.ALLOWED),
         "active_runs": sum(1 for t in wa_bridge._runs.values() if not t.done()),
     }
+
+
+@app.get("/api/whatsapp-qr/health")
+async def wa_qr_health() -> dict:
+    """Pairing state for the QR-linked WhatsApp. Never returns the session."""
+    return wa_qr.status()
+
+
+@app.get("/api/whatsapp-qr/image", include_in_schema=False)
+def wa_qr_image() -> FileResponse:
+    """The pairing QR as a PNG, for scanning off a screen rather than a console.
+
+    A Windows console at the wrong font size renders a QR as unreadable mush; the image
+    always works. It exists only while pairing is pending and is deleted on connect —
+    a live pairing code is a credential.
+    """
+    if not wa_qr.QR_PNG.is_file():
+        raise HTTPException(status_code=404,
+                            detail="No pairing code pending. Either it is already linked, "
+                                   "or WhatsApp QR is not enabled.")
+    return FileResponse(wa_qr.QR_PNG, media_type="image/png")
 
 
 @app.get("/api/discord/health")

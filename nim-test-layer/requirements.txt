@@ -8,3 +8,7 @@ pydantic>=2.6
 # after disconnect, heartbeat drift and rate-limit buckets are not, and getting those
 # wrong yields a bot that goes quiet at 3am rather than one that fails loudly.
 discord.py>=2.4
+
+# Optional: QR-scan WhatsApp (ENABLE_WHATSAPP_QR=1). Unofficial client - violates
+# WhatsApp ToS and risks the phone number being banned. See wa_qr.py before enabling.
+neonize>=0.4

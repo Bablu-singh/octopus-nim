@@ -219,7 +219,40 @@ itself is easy; resume-after-disconnect, heartbeat drift and rate-limit buckets 
 and getting those wrong produces a bot that goes quiet at 3am rather than one that fails
 loudly.
 
-## Driving it from WhatsApp
+## WhatsApp by QR scan (unofficial)
+
+Links the way WhatsApp Web does — scan a QR once from the phone, the session persists. No
+Meta account, no tunnel, no 24-hour messaging window.
+
+> **This is against WhatsApp's Terms of Service.** It drives the WhatsApp Web protocol
+> through an unofficial client (`whatsmeow`, via `neonize`). Enforcement is real, and a
+> ban lands on the **phone number**, not on a revocable key — what is at risk is the
+> WhatsApp account itself, with its chats, groups and contacts.
+>
+> **Use a spare number.** The route with no account risk at all is Discord, above.
+
+Enabling it takes two switches, because the risk should be accepted rather than
+discovered:
+
+```bash
+ENABLE_WHATSAPP_QR=1
+WHATSAPP_QR_ACCEPT_RISK=1     # says the paragraph above was read
+WHATSAPP_QR_ALLOWED=91XXXXXXXXXX
+```
+
+Either one alone refuses to start and says which is missing. An empty allowlist means it
+ignores everyone.
+
+On first start it prints a QR in the terminal, writes `wa_qr.png`, and serves it at
+`/api/whatsapp-qr/image` — a console at the wrong font size renders a QR as mush, so
+there is always an image. Scan it from **WhatsApp → Linked devices**. The image is deleted
+the moment pairing succeeds; a live pairing code is a credential, as is the session
+database (`wa_session.sqlite3` — gitignored, and anyone holding it can act as your
+WhatsApp).
+
+Same commands as everywhere else, since it uses the same bridge.
+
+## Driving it from WhatsApp (official Cloud API)
 
 The agent pool runs on your machine; WhatsApp becomes a second front door to it. Send a
 task from your phone and each agent's answer arrives as it finishes.
