@@ -36,6 +36,8 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 
 import chat_bridge
@@ -61,6 +63,22 @@ _client = None
 _thread: threading.Thread | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _state = {"connected": False, "qr": None, "me": None, "error": None}
+
+# Ids of messages this process sent. When the linked account is also the account being
+# messaged — the "message yourself" pattern, which is the natural way to use a bot that
+# *is* your own WhatsApp — every reply comes back in as an inbound message from you. Left
+# alone that is an infinite loop: reply, read own reply, reply again. Bounded because the
+# process runs for days.
+_sent_ids: "OrderedDict[str, float]" = OrderedDict()
+SENT_MAX = 300
+
+
+def _remember_sent(msg_id: str) -> None:
+    if not msg_id:
+        return
+    _sent_ids[msg_id] = time.time()
+    while len(_sent_ids) > SENT_MAX:
+        _sent_ids.popitem(last=False)
 
 WARNING = (
     "WhatsApp QR uses an unofficial client. WhatsApp's terms prohibit this and bans "
@@ -100,7 +118,9 @@ def _transport(chat_jid) -> chat_bridge.Transport:
         loop = asyncio.get_running_loop()
         for part in chat_bridge.split(text, MAX_BODY):
             try:
-                await loop.run_in_executor(None, _client.send_message, chat_jid, part)
+                resp = await loop.run_in_executor(
+                    None, _client.send_message, chat_jid, part)
+                _remember_sent(str(getattr(resp, "ID", "") or ""))
             except Exception as err:
                 print(f"[wa-qr] send failed: {type(err).__name__}: {err}", flush=True)
                 return False
@@ -155,6 +175,13 @@ def _run_client() -> None:
     def _on_connected(_c, _e) -> None:
         _state["connected"] = True
         _state["qr"] = None
+        # PairStatusEv only fires the first time a device is linked, so on every later
+        # start — reconnecting from the stored session, which is the normal case — the
+        # number would otherwise read as unknown. Ask the client who it is instead.
+        try:
+            _state["me"] = _digits(client.get_me().JID)
+        except Exception:
+            pass
         try:
             QR_PNG.unlink(missing_ok=True)      # the code is spent; do not leave it lying
         except OSError:
@@ -176,9 +203,18 @@ def _run_client() -> None:
     def _on_message(_c, message) -> None:
         try:
             info = message.Info
-            if getattr(info, "IsFromMe", False):
-                return
+            msg_id = str(getattr(info, "ID", "") or "")
+            if msg_id in _sent_ids:
+                return                                 # our own reply coming back
+
             sender = _digits(info.MessageSource.Sender)
+            # A message from the linked account is normally this bot talking. It is also
+            # how someone drives a bot that *is* their own WhatsApp: they message
+            # themselves. Both look identical here, so the id check above is what
+            # separates them — an echo of our own send is dropped, anything else the
+            # account typed is real input.
+            if getattr(info, "IsFromMe", False) and sender not in ALLOWED:
+                return
             if sender not in ALLOWED:
                 return                                 # silence, not an error
             body = (message.Message.conversation
