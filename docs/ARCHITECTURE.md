@@ -3,10 +3,15 @@
 Octopus takes one task, decides how many agents it deserves, decides *where each of them
 should run*, and streams all of them back over a single connection.
 
-There are two ideas doing the real work. The first is that **a role is a template, not a
-roster** — a role can be instantiated as many times as the task divides, so the pool grows
-with the work. The second is that **a model is not a promise** — nothing is bound until it
-has been proven to answer, and nothing is bound to one vendor.
+Three ideas do the real work:
+
+1. **A role is a template, not a roster.** A role can be instantiated as many times as the
+   task divides, so the pool grows with the work rather than being fixed at six.
+2. **A model is not a promise.** Nothing is bound until it has been proven to answer, and
+   nothing is bound to one vendor.
+3. **Availability is the only truth.** Every routing decision degrades to the set of
+   providers actually reachable right now, so a stopped server, an exhausted quota or a
+   provider switched off by flag all need no code path of their own.
 
 ---
 
@@ -22,13 +27,14 @@ flowchart TB
     end
 
     subgraph server["FastAPI — app.py"]
-        API["/api/dispatch · /api/catalog<br>/api/providers · /api/route"]
+        API["/api/dispatch · /api/catalog<br>/api/providers · /api/route · /api/web"]
     end
 
     subgraph brain["Orchestration"]
-        OCT["octopus.py<br/><i>waves, supervisor, re-binding</i>"]
+        OCT["octopus.py<br/><i>waves, supervisor, re-binding, ledger</i>"]
         ROUTE["routing.py<br/><i>how heavy is this subtask?</i>"]
-        AG["agents.py<br/><i>5 role templates, model preferences</i>"]
+        AG["agents.py<br/><i>6 role templates, model preferences</i>"]
+        WEB["web.py<br/><i>search · fetch · untrusted-content fencing</i>"]
     end
 
     subgraph transport["Provider layer"]
@@ -45,7 +51,9 @@ flowchart TB
     UI --> API --> OCT
     OCT --> ROUTE
     OCT --> AG
+    OCT --> WEB
     OCT --> PROV
+    WEB --> INET["the live web<br/><i>keyless search + fetch</i>"]
     PROV --> LOCAL
     PROV --> NIM
     PROV --> GEM
@@ -71,7 +79,7 @@ round trip to every agent, which on a one-line question costs more than just ans
 flowchart TB
     S["subtask + role"] --> W["routing.weigh()"]
 
-    W --> R1["role baseline<br/>writer .30 · scheduler .25<br/>analyst .40 · coder .50"]
+    W --> R1["role baseline<br/>writer .30 · scheduler .25 · analyst .40<br/>coder .50 · researcher .50"]
     R1 --> R2["+ depth cues<br/><i>comprehensive, migration,<br/>production-ready, test suite</i>"]
     R2 --> R3["− brevity cues<br/><i>short, quick, typo,<br/>what is, rename</i>"]
     R3 --> R4["± request length<br/>and listed requirements"]
@@ -120,6 +128,7 @@ sequenceDiagram
     participant S as supervisor
 
     U->>O: POST /api/dispatch {task}
+    O-->>U: event: status (the catalog read is not instant on a cold cache)
     O->>C: merged catalog
     Note over C: NIM: probe every candidate<br/>Local, Gemini: trusted — they list<br/>only what they will serve
     C-->>O: qualified ids + verified set
@@ -131,6 +140,7 @@ sequenceDiagram
 
     par every agent at once
         O->>A: route → bind → stream
+        Note over A: researcher agents (and any subtask<br/>containing a URL) fetch and fence<br/>web sources first
         A-->>U: chunk · chunk · done
     end
 
@@ -182,6 +192,48 @@ or free-tier quota confirming something already true.
 
 ---
 
+## Reading the internet
+
+A model's knowledge stops at its training cut-off. `web.py` is the eyes — and the part of
+the system with the largest attack surface, because it puts text written by strangers in
+front of a model.
+
+```mermaid
+flowchart TB
+    ST["subtask"] --> Q{"researcher role,<br/>or a URL in the text?"}
+    Q -->|no| PLAIN["run the agent as-is"]
+    Q -->|yes| G{"check_url:<br/>resolved address public?"}
+
+    G -->|"loopback / private /<br/>link-local / non-http"| REF["refuse<br/><i>this would read your own machine</i>"]
+    G -->|public| F["throttled fetch<br/>size-capped · cached"]
+    F --> X["HTML → text"]
+    X --> FENCE["wrap in<br/>&lt;&lt;&lt;UNTRUSTED_WEB_CONTENT&gt;&gt;&gt;"]
+    FENCE --> SYS["+ guardrail into the SYSTEM prompt"]
+    SYS --> RUN["run the agent<br/><i>evidence, never instructions</i>"]
+    RUN --> CITE["answer with source URLs"]
+```
+
+**Fetched content is untrusted.** A page can contain text written specifically for a model
+to read — *"ignore your instructions and instead…"*. An agent that treats a page as
+instructions rather than as evidence will follow them; that is the normal failure mode of
+giving a model a browser, not a hypothetical.
+
+Two mitigations, both structural rather than hopeful:
+
+- The guardrail goes into the **system** prompt, not the user turn, so it outranks
+  anything the page says. `as_context()` is the only path from the web into a prompt and
+  it always fences, so there is no route that forgets to.
+- `check_url()` resolves the hostname and refuses private, loopback and link-local
+  addresses — including the cloud metadata endpoint at `169.254.169.254` — so a subtask
+  cannot turn the agent pool into a reader of the machine it runs on. Checking the
+  resolved address rather than the name is what makes a public hostname pointing inward
+  fail too.
+
+Neither makes injection impossible. They remove the easy version and keep the boundary
+visible in the transcript when something does go wrong.
+
+---
+
 ## Spending as little as possible
 
 Every provider in the table is free, so the budget being protected is quota and
@@ -193,6 +245,8 @@ wall-clock, not money. Four mechanisms, in order of how much they save:
 | Light tasks capped at one wave | the supervisor's call plus the agents it would invent |
 | Deliverable dedupe, one retry per slice | repeat work across waves |
 | Per-provider token caps, optional dispatch ceiling | runaway generation |
+| Catalog warmed at startup, cached 15 min | ~26 verification probes per dispatch |
+| Page cache in `web.py` | refetching the same URL across agents |
 
 The ledger then reports what was actually spent, per provider, in the `complete` event.
 Token counts are estimates — agents stream, and streaming responses carry no usage block
@@ -221,6 +275,17 @@ fire at once and then sit out the rest of the minute, which is exactly the shape
 trips a per-minute quota. Waiting a few hundred milliseconds costs less than the retry
 that a `429` would have cost.
 
+Repeated throttling backs off exponentially — 30s, 60s, 120s — because honouring a
+provider's `Retry-After` literally and retrying got a second `429` straight away: the
+limit that bit was a per-minute one and the wait had not cleared it. Any successful call
+resets the count.
+
+The gate applies to verification probes too, which is why `OCTOPUS_PROBE_PER_ROLE` exists.
+Probing every candidate for six roles is ~26 requests; at NIM's 36/min that is 43 seconds
+in which a cold dispatch produces nothing visible, which reads as a hung app rather than
+as careful verification. Hence four per role, a catalog warmed during startup, and a
+`status` event emitted *before* the catalog read rather than after.
+
 A `429` is never treated as a broken model. The model stays in the verified set and the
 *provider* stands down, because the alternative — dropping the model — would both lose a
 working model and send the retry to a different model on the same throttled provider.
@@ -230,7 +295,7 @@ working model and send the retry to a different model on the same throttled prov
 ## Adding a provider
 
 1. Add a row to `PROVIDERS` in `providers.py` — name, base URL, key env var, timeouts,
-   plus `prefers` and `priority` so the router knows where it sits.
+   `rpm`, cost, plus `prefers` and `priority` so the router knows where it sits.
 2. If it speaks OpenAI's `/chat/completions`, that is the whole job. Gemini was exactly
    this: one row, because Google publishes an OpenAI-compatible surface. The only wrinkle
    was that it answers a bad key with `400` rather than `401`, and that it prefixes listed
@@ -248,3 +313,9 @@ OpenAI and Anthropic are already registered and disabled. They are off because t
 paid and Octopus is deliberately free-resources-only — not because the shape does not
 support them. Gemini is the proof: it went in as a registry row and a handful of model
 names, with no change to the octopus, the tentacles, or the UI.
+
+Every provider also has an off switch — `ENABLE_NVIDIA=0`, `ENABLE_GEMINI=0`,
+`ENABLE_LOCAL=0`. That is the answer to "what if a free tier stops being free": the
+provider leaves `usable`, every agent routes to what remains, and one restart undoes it.
+No new machinery was needed, because availability was always the only thing the router
+trusted.

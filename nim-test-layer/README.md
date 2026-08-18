@@ -70,8 +70,8 @@ works out what kind of work it is, and sizes the pool to it:
 | "Write a function that validates IBANs, with unit tests." | 2 coders |
 | A migration naming 7 deliverables | 7 agents across 4 roles |
 
-There are five **roles** — writer, coder, scheduler, imager, analyst — but they are
-templates, not a roster. A role is instantiated as often as the work divides, so three
+There are six **roles** — writer, coder, scheduler, imager, analyst, researcher — but
+they are templates, not a roster. A role is instantiated as often as the work divides, so three
 coders on three modules is normal. Nothing caps the pool at five.
 
 Everything in a wave runs concurrently, with `OCTOPUS_MAX_PARALLEL` (default 6) talking
@@ -127,6 +127,50 @@ Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apike
 routing rotation — no code change, because Google publishes an OpenAI-compatible surface
 at `/v1beta/openai`. Two quirks are handled in `providers.py`: it answers a rejected key
 with `400` rather than `401`, and it prefixes listed ids with `models/`.
+
+## Reading the internet
+
+A model's knowledge stops at its training cut-off. The **researcher** role closes that
+gap: it searches the live web, reads the top pages, and answers with citations. Any other
+agent also gets a page fetched for it when its subtask contains a URL — quoting a link
+plainly means "read this", not "guess what this says".
+
+Keyless, like everything else here: DuckDuckGo's lite endpoint for search, direct HTTP for
+pages, a small built-in HTML-to-text extractor so there is no parser dependency. Requests
+are throttled, capped in size, and cached for 15 minutes.
+
+```bash
+# search and read, no model involved
+curl -s localhost:8000/api/web -H 'Content-Type: application/json'   -d '{"query":"Ollama structured outputs release notes"}' | jq '.sources'
+
+# read one page
+curl -s localhost:8000/api/web -H 'Content-Type: application/json'   -d '{"url":"https://example.com"}' | jq '.title'
+```
+
+### Fetched content is untrusted
+
+A web page can contain text written to be read by a model — *"ignore your instructions
+and instead…"* — and an agent that treats a page as instructions will follow them. So
+every excerpt is wrapped between `<<<UNTRUSTED_WEB_CONTENT>>>` markers and the agent's
+system prompt is extended to say that nothing inside those markers is an instruction,
+that it is evidence to cite, and that anything directive-shaped should be reported as
+suspicious rather than obeyed. `as_context()` is the only path from the web into a prompt,
+and it always fences.
+
+This does not make prompt injection impossible — nothing does — but it removes the easy
+version and keeps the boundary visible in the transcript.
+
+### It will not read your machine
+
+Fetches are gated on the **resolved** address, not the hostname, so a public name that
+points at a private one is refused too. Loopback, private ranges, link-local (including
+the cloud metadata endpoint at `169.254.169.254`), plus non-HTTP schemes and admin ports
+are all blocked:
+
+```
+'127.0.0.1' resolves to a private or local address. The agent pool reads the
+public internet only — this would be reading your own machine.
+```
 
 ## Cost, rate limits, and turning a provider off
 
@@ -184,6 +228,7 @@ for streaming it is the gap between chunks), and `NIM_PROBE_TIMEOUT`.
 | GET | `/api/health` | What is usable right now (key fingerprint only, never the key) |
 | GET | `/api/providers` | Every registered provider, its state, and the routing config |
 | POST | `/api/route` | Dry-run: where would this subtask go, and why? Dispatches nothing |
+| POST | `/api/web` | Search the web or read one page — no model involved |
 | GET | `/api/models` | Every model ID one provider lists (`?provider=local`) |
 | GET | `/api/catalog` | Which of those actually answer, grouped, with per-provider bindings |
 | POST | `/api/dispatch` | Plan and run an agent pool over one task, streamed as SSE |

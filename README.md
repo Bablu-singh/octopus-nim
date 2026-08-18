@@ -19,10 +19,11 @@ You never pick an agent type. A planner reads the task and sizes the pool to it:
 | "What is 12 percent of 340?" | 1 agent, 1 wave |
 | "Write a function that validates IBANs, with unit tests." | 2 coders |
 | A migration naming 7 deliverables | 7 agents across 4 roles |
+| "What does Ollama's changelog say about structured outputs?" | 1 researcher, reading the live web |
 
-There are five **roles** — writer, coder, scheduler, imager, analyst — but they are
-templates, not a roster. A role is instantiated as often as the work divides, so three
-coders on three modules is normal. Nothing caps the pool at five.
+There are six **roles** — writer, coder, scheduler, imager, analyst, researcher — but
+they are templates, not a roster. A role is instantiated as often as the work divides, so
+three coders on three modules is normal. Nothing caps the pool at six.
 
 Each wave runs concurrently. When it finishes, a supervisor reads what came back and adds
 agents for anything still uncovered, repeating until it says stop or a budget runs out —
@@ -82,6 +83,28 @@ seam in `providers.py`.
 A provider is a base URL, an optional key, and a wire format. Models are addressed as
 `provider:model` everywhere above `providers.py`, so adding one is a row in a registry —
 not a refactor of the octopus, the tentacles, or the UI.
+
+## It can read the internet
+
+A model's knowledge stops at its training cut-off. The **researcher** role closes that
+gap — it searches the live web, reads the top results and answers with citations — and any
+agent gets a page fetched for it when its subtask contains a URL.
+
+Keyless, like the rest of the stack: DuckDuckGo's lite endpoint for search, direct HTTP
+for pages, a small built-in HTML-to-text extractor. Throttled, size-capped and cached.
+
+Two things matter more than the plumbing:
+
+**Fetched content is untrusted.** A page can contain text aimed at the model reading it.
+Every excerpt is fenced between `<<<UNTRUSTED_WEB_CONTENT>>>` markers, and the agent's
+system prompt says that nothing inside them is an instruction — it is evidence to cite,
+and anything directive-shaped should be reported as suspicious rather than obeyed. That
+does not make injection impossible; it removes the easy version and keeps the boundary
+visible.
+
+**It will not read your machine.** Fetches are checked against the *resolved* address, so
+loopback, private ranges and the cloud metadata endpoint are refused even behind a public
+hostname.
 
 ## Cost, quota and switching a provider off
 
