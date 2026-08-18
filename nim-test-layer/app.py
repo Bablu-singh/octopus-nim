@@ -10,6 +10,7 @@ endpoint here works with no key and no network.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
@@ -26,6 +27,7 @@ import nim_client as nim
 import octopus
 import providers
 import routing
+import web
 
 ENV_FILE = Path(__file__).parent / ".env"
 STATIC = Path(__file__).parent / "static"
@@ -43,7 +45,24 @@ async def lifespan(_: FastAPI):
         mark = "ok  " if p["usable"] else "--  "
         say(f"{mark}{p['label']:<12} {p['state']:<12} {p['base_url']}")
     say(f"routing: {routing.MODE} (threshold {routing.THRESHOLD})")
-    yield
+    say(f"web access: {'on' if web.ENABLED else 'off'}")
+
+    # Warm the catalog in the background. Verifying which models actually answer costs a
+    # probe per candidate against each provider's rate limit; paying that during startup,
+    # while the user is still opening the page, is free. Paying it on the first dispatch
+    # makes the app look hung for a minute before the first agent appears.
+    async def warm() -> None:
+        try:
+            cat = await octopus.catalog(_optional_key(None))
+            say(f"catalog warm: {cat['verified']} of {cat['total']} models answered")
+        except Exception as err:                      # never let this break startup
+            say(f"catalog warm failed ({type(err).__name__}) — it will be read on demand")
+
+    task = asyncio.create_task(warm())
+    try:
+        yield
+    finally:
+        task.cancel()
 
 
 app = FastAPI(title="Octopus", version="2.0.0", lifespan=lifespan)
@@ -147,6 +166,44 @@ async def api_route(req: RouteRequest, x_nim_key: str | None = Header(default=No
     }
 
 
+class WebRequest(BaseModel):
+    query: str | None = None
+    url: str | None = None
+    results: int = Field(default=5, ge=1, le=10)
+    pages: int = Field(default=3, ge=0, le=6)
+
+
+@app.post("/api/web")
+async def api_web(req: WebRequest) -> dict:
+    """Search the web, or read one page. Dry run — no model is involved.
+
+    Here so the fetching can be checked on its own: when a research agent answers oddly
+    the first question is always whether it got sensible sources, and that should be
+    answerable without spending a completion to find out.
+    """
+    if not web.ENABLED:
+        raise HTTPException(status_code=503, detail="Web access is off. Set ENABLE_WEB=1.")
+    try:
+        if req.url:
+            page = await web.fetch(req.url)
+            if not page.ok:
+                raise HTTPException(status_code=502, detail=page.error)
+            return {"url": page.url, "title": page.title, "chars": len(page.text),
+                    "text": page.text}
+        if not req.query:
+            raise HTTPException(status_code=422, detail="Give either a query or a url.")
+        bundle = await web.research(req.query, req.results, req.pages)
+        return {
+            "query": bundle["query"],
+            "results": bundle["results"],
+            "sources": web.sources(bundle),
+            "failed": bundle["failed"],
+            "context_chars": len(web.as_context(bundle)),
+        }
+    except web.WebError as err:
+        raise HTTPException(status_code=502, detail=str(err)) from err
+
+
 @app.get("/api/catalog")
 async def api_catalog(force: bool = False, x_nim_key: str | None = Header(default=None)) -> dict:
     """Everything reachable right now, across providers, with per-provider bindings."""
@@ -189,6 +246,8 @@ async def health(x_nim_key: str | None = Header(default=None)) -> dict:
         "usable": usable,
         "providers": survey,
         "route_mode": routing.MODE,
+        "web": {"enabled": web.ENABLED, "results": web.RESULTS,
+                "rpm": web.REQUESTS_PER_MIN},
         "source": ("console" if runtime else ".env") if key else None,
         "fingerprint": providers.key_fingerprint(key or ""),
         "looks_like_nvapi": bool(key and key.startswith("nvapi-")),

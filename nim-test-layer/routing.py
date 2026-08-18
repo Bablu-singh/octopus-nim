@@ -46,6 +46,9 @@ ROLE_WEIGHT: dict[str, float] = {
     "analyst": 0.40,
     "scheduler": 0.25,
     "coder": 0.50,
+    # Reads several thousand characters of fetched page before answering, so the prompt
+    # is long even when the question is short — which is where a small model struggles.
+    "researcher": 0.50,
     "imager": 1.00,   # no local image model exists here; see `choose`
 }
 

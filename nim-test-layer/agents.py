@@ -220,6 +220,31 @@ TENTACLES: list[Tentacle] = [
         temperature=0.3,
         max_tokens=1800,
     ),
+    Tentacle(
+        id="researcher",
+        name="Researcher",
+        color="#6ec8ff",
+        blurb="Looks things up on the live web and answers with sources",
+        keywords=["latest", "current", "today", "recent", "news", "look up", "find out",
+                  "search", "who is", "what happened", "price", "pricing", "release",
+                  "changelog", "documentation", "docs", "version", "compare", "up to date",
+                  "this year", "right now", "trend", "announcement"],
+        candidates=["nemotron-3-super", "gpt-oss-120b", "llama-3.3-70b", "mistral-large",
+                    "nemotron-3-ultra", "llama-3.1-70b", "llama-3.1-8b",
+                    "gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash",
+                    # Local: this role reads several thousand characters of fetched page
+                    # before it answers, so the 7B rather than the 3B.
+                    "qwen2.5", "mistral", "llama3.2"],
+        fallback_families=["chat", "reasoning"],
+        system=("You are a research specialist. You are given excerpts from web pages that "
+                "were fetched moments ago. Answer strictly from them: quote figures as they "
+                "appear, attribute every claim to the source URL it came from, and say "
+                "plainly when the sources do not answer the question rather than filling "
+                "the gap from memory. Note disagreement between sources rather than "
+                "silently picking one. End with a 'Sources' list of the URLs you used."),
+        temperature=0.2,
+        max_tokens=1800,
+    ),
 ]
 
 BY_ID = {t.id: t for t in TENTACLES}
@@ -324,13 +349,17 @@ def bind(model_ids: list[str], live: set[str] | None = None,
 # --- planning ---------------------------------------------------------------
 
 ROLE_MENU = ("writer (prose), coder (code), scheduler (dated plans), "
-             "imager (visuals), analyst (reasoning and analysis)")
+             "imager (visuals), analyst (reasoning and analysis), "
+             "researcher (looks it up on the live web and cites sources)")
 
 SCHEMA = ('{"agents": [{"role": str, "label": str, "subtask": str}], "why": str}')
 
-ROLE_RULE = ('"role" must be exactly one of these five strings: "writer", "coder", '
-             '"scheduler", "imager", "analyst". Never invent another role name; pick the '
-             'closest of the five. Anything reasoned out or worked out is "analyst".')
+ROLE_RULE = ('"role" must be exactly one of these six strings: "writer", "coder", '
+             '"scheduler", "imager", "analyst", "researcher". Never invent another role '
+             'name; pick the closest of the six. Anything reasoned out or worked out from '
+             'what you already know is "analyst"; anything that needs a current fact — '
+             'a price, a version, a release date, what happened recently, what a specific '
+             'page says — is "researcher", because only that role can read the internet.')
 
 
 def planner_system(budget: int) -> str:

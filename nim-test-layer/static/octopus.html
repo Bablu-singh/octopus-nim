@@ -153,6 +153,15 @@
   .card code{font-family:var(--mono);font-size:.92em;background:#04161d;padding:1px 5px;border-radius:4px}
   .card img{max-width:100%;border-radius:8px;display:block}
   .fail{color:#ff9b8f;font-family:var(--mono);font-size:12.5px}
+  /* Where a research agent actually read. Shown before the answer streams, because the
+     first question about any sourced answer is which pages it came from. */
+  .srcs{font-family:var(--mono);font-size:11px;color:var(--muted);padding:9px 15px;
+    border-bottom:1px solid #0f3341;background:#061c25}
+  .srcs b{color:var(--glow);font-weight:500}
+  .srcs a{color:#6ec8ff;text-decoration:none;display:block;margin-top:3px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .srcs a:hover{text-decoration:underline}
+  .srcs .miss{color:#ff9b8f}
   table.plan{width:100%;border-collapse:collapse;font-size:13.5px}
   table.plan td{padding:8px 10px;border-top:1px solid #0f3341;vertical-align:top}
   table.plan td.when{font-family:var(--mono);font-size:12px;color:var(--c);white-space:nowrap}
@@ -495,7 +504,12 @@ $("go").onclick = async () => {
         if (!line.startsWith("data:")) continue;
         let e; try { e = JSON.parse(line.slice(5)); } catch { continue; }
 
-        if (e.event === "providers") {
+        if (e.event === "status") {
+          // Cold-catalog verification can take most of a minute. Saying so beats an
+          // empty screen, which reads as a hung app.
+          $("why").innerHTML = `<span class="tag">working</span> ${esc(e.detail)}`;
+        }
+        else if (e.event === "providers") {
           // Sent once, before wave 1, so the run states up front where it can send work.
           const up = e.providers.filter(p => p.usable).map(p => p.name);
           $("why").innerHTML = `<span class="tag">routing ${esc(e.mode)}</span> ` +
@@ -515,6 +529,27 @@ $("go").onclick = async () => {
           a.status = "busy";
           $("card-" + e.id)?.classList.add("busy");
           layout();
+        }
+        else if (e.event === "searching") {
+          const card = $("card-" + e.id);
+          if (card && !card.querySelector(".srcs")) {
+            const d = document.createElement("div");
+            d.className = "srcs"; d.id = "srcs-" + e.id;
+            d.innerHTML = `<b>web</b> · ${esc(e.detail || "searching…")}`;
+            card.querySelector("h3").after(d);
+          }
+        }
+        else if (e.event === "sources") {
+          const box = $("srcs-" + e.id);
+          if (box) {
+            const list = (e.sources || []).map(s2 =>
+              `<a href="${esc(s2.url)}" target="_blank" rel="noopener noreferrer">${esc(s2.title || s2.url)}</a>`).join("");
+            const bad = (e.failed || []).length
+              ? `<div class="miss">${e.failed.length} link(s) unreadable</div>` : "";
+            box.innerHTML = (e.sources || []).length
+              ? `<b>read ${e.sources.length} source(s)</b>${list}${bad}`
+              : `<span class="miss">${esc(e.detail || "no sources")}</span>${bad}`;
+          }
         }
         else if (e.event === "chunk") {
           const a = A.get(e.id); if (!a) continue;

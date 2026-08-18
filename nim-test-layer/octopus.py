@@ -23,10 +23,16 @@ import httpx
 import agents
 import providers
 import routing
+import web
 
 IMAGE_BASE = os.getenv("NVIDIA_IMAGE_BASE", "https://ai.api.nvidia.com/v1/genai")
 CATALOG_TTL = 900          # seconds; verification is expensive, so cache it for a while
 PROBE_CONCURRENCY = 16
+# How many candidates per role get probed on a cold catalog. Every probe is a real
+# request against the provider's rate limit, so this is the difference between a first
+# dispatch that starts in seconds and one that sits silent for a minute. Four is enough
+# to find a working model for a role in practice; the fallback pool covers the rest.
+PROBE_PER_ROLE = int(os.getenv("OCTOPUS_PROBE_PER_ROLE", "4"))
 STALL_TIMEOUT = 120        # seconds of silence from every agent before giving up
 
 # The agent pool is sized by the task, not by the number of roles. A role is a template
@@ -81,7 +87,7 @@ async def _verify(p: providers.Provider, ids: list[str]) -> set[str]:
 
     wanted: list[str] = []
     for t in agents.TENTACLES:
-        wanted += [m for m, _ in agents.shortlist(t, ids)]
+        wanted += [m for m, _ in agents.shortlist(t, ids, limit=PROBE_PER_ROLE)]
     wanted = list(dict.fromkeys(wanted))  # dedupe, preserve order
 
     sem = asyncio.Semaphore(PROBE_CONCURRENCY)
@@ -350,6 +356,61 @@ async def _run_agent(key: str | None, agent: dict, queue: asyncio.Queue,
     async with sems.get(prov, sems["nvidia"]):
         started = time.perf_counter()
         ms = lambda: int((time.perf_counter() - started) * 1000)
+
+        # Eyes, for the roles that need them. A researcher always looks things up; any
+        # other agent does too if its subtask names a URL, because a subtask that quotes
+        # a link plainly wants that page read rather than guessed at.
+        system, prompt = t.system, agent["subtask"]
+        urls = web.URL_IN_TEXT.findall(agent["subtask"])
+        if web.ENABLED and (role == "researcher" or urls):
+            await queue.put(_event("searching", id=aid,
+                                   detail=f"reading {len(urls)} link(s)" if urls
+                                          else "searching the web"))
+            try:
+                if urls:
+                    pages = await asyncio.gather(*(web.fetch(u) for u in urls[:4]))
+                    bundle = {"query": agent["subtask"],
+                              "results": [],
+                              "pages": [p for p in pages if p.ok],
+                              "failed": [{"url": p.url, "error": p.error}
+                                         for p in pages if not p.ok]}
+                else:
+                    bundle = await web.research(agent["subtask"])
+                context = web.as_context(bundle)
+                if context:
+                    # The guardrail goes in the system prompt, not the user turn: it has
+                    # to outrank anything the fetched page tries to say.
+                    system = f"{t.system}\n\n{web.GUARDRAIL}"
+                    prompt = (f"{context}\n\nUsing only the sources above, do this:\n"
+                              f"{agent['subtask']}")
+                    await queue.put(_event("sources", id=aid,
+                                           sources=web.sources(bundle),
+                                           query=bundle.get("query", ""),
+                                           hits=len(bundle.get("results", [])),
+                                           failed=bundle.get("failed", [])))
+                elif role == "researcher":
+                    # Silence here is what produces invented citations: asked for sources
+                    # and given none, a model helpfully supplies plausible-looking URLs.
+                    # Saying so explicitly, in the prompt, is what stops it.
+                    prompt = f"""NO SOURCES WERE RETRIEVED. The web search returned
+nothing readable for this question.
+
+Say plainly that you could not retrieve sources and therefore cannot verify an answer.
+You may add what you know from training, clearly labelled as unverified and possibly out
+of date. Do NOT invent, guess at, or reconstruct any URL — cite nothing rather than
+citing something you did not read.
+
+The question:
+{agent['subtask']}"""
+                    await queue.put(_event("sources", id=aid, sources=[],
+                                           query=bundle.get("query", ""),
+                                           hits=len(bundle.get("results", [])),
+                                           failed=bundle.get("failed", []),
+                                           detail="nothing readable came back — "
+                                                  "answering without sources"))
+            except web.WebError as err:
+                await queue.put(_event("sources", id=aid, sources=[], failed=[],
+                                       detail=f"web lookup failed: {err}"))
         await queue.put(_event("start", id=aid, role=role, label=agent["label"],
                                model=model, name=t.name, color=t.color,
                                provider=prov, route_why=agent.get("route_why", "")))
@@ -362,7 +423,7 @@ async def _run_agent(key: str | None, agent: dict, queue: asyncio.Queue,
                 return
 
             chunks = 0
-            async for line in providers.chat_stream(model, agent["subtask"], system=t.system,
+            async for line in providers.chat_stream(model, prompt, system=system,
                                                     temperature=t.temperature,
                                                     max_tokens=t.max_tokens, key=key):
                 if not line.startswith("data:"):
@@ -380,7 +441,10 @@ async def _run_agent(key: str | None, agent: dict, queue: asyncio.Queue,
                     await queue.put(_event("chunk", id=aid, text=delta))
 
             if ledger is not None:
-                ledger.add(prov, t.system + agent["subtask"], outputs[aid])
+                # `prompt` rather than the subtask: fetched context is most of what was
+                # sent on a research agent, and a ledger that ignored it would under-report
+                # the expensive calls by an order of magnitude.
+                ledger.add(prov, system + prompt, outputs[aid])
 
             if chunks == 0:
                 _mark_dead(key, model)
@@ -435,6 +499,11 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
     `roles` is a debugging escape hatch that seeds wave 1 by hand. The UI never sends it:
     identifying the kind of work is the planner's job, not the user's.
     """
+    # Emitted before the catalog is read, not after. On a cold cache that read probes
+    # every candidate model against a rate limit and can take the best part of a minute,
+    # during which the UI previously showed nothing at all — which reads as a hung app,
+    # or as agents running one at a time.
+    yield _event("status", detail="reading model catalogs and verifying which models answer…")
     try:
         cat = await catalog(key)
     except providers.ProviderError as err:
@@ -463,6 +532,7 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
         yield _event("complete", agents=0, waves=0)
         return
 
+    yield _event("status", detail="planning the agent pool…")
     planner_provider, planner_why = routing.choose_planner(usable, mode)
     thinker = agents.pick_planner(live - dead, planner_provider)
 
