@@ -56,20 +56,81 @@ def configured() -> tuple[bool, str]:
     return True, "ready"
 
 
+# Discord embeds hold 4096 characters of description against 2000 for a plain message,
+# and carry a title, a colour and a footer. That is most of the difference between an
+# answer that reads as a document and one that reads as three fragments in a row.
+EMBED_LIMIT = int(os.getenv("DISCORD_EMBED_LIMIT", "4000"))
+
+
+def _colour(css: str):
+    """'#f2b56b' -> a discord.Colour. Each role already has one; reuse it."""
+    import discord
+    try:
+        return discord.Colour(int((css or "").lstrip("#"), 16))
+    except (ValueError, AttributeError):
+        return discord.Colour(0x5FD8D1)
+
+
 def _transport(channel) -> chat_bridge.Transport:
+    """A Discord conversation.
+
+    Three surfaces rather than one: a status line that is edited in place as the run
+    progresses, embed cards for the answers, and plain sends for everything else. The
+    status line is what stops a five-agent run producing fifteen messages.
+    """
+    import discord
+
+    state = {"status": None}
+
     async def send(text: str) -> bool:
         for part in chat_bridge.split(text, LIMIT):
             try:
                 await channel.send(part)
-            except Exception as err:                  # a dead channel must not kill the run
+            except Exception as err:
                 print(f"[discord] send failed: {type(err).__name__}: {err}", flush=True)
                 return False
         return True
 
+    async def status(text: str) -> bool:
+        """Rewrite the run's progress line, or post it the first time."""
+        body = text if len(text) <= EMBED_LIMIT else text[:EMBED_LIMIT]
+        try:
+            embed = discord.Embed(description=body, colour=discord.Colour(0x1ABC9C))
+            msg = state.get("status")
+            if msg is None:
+                state["status"] = await channel.send(embed=embed)
+            else:
+                await msg.edit(embed=embed)
+            return True
+        except Exception as err:
+            # An edit can fail if the message was deleted; falling back to a new one
+            # keeps the run legible rather than silently losing its progress.
+            print(f"[discord] status failed: {type(err).__name__}: {err}", flush=True)
+            state["status"] = None
+            return await send(text)
+
+    async def card(title: str, body: str, colour: str = "", footer: str = "") -> bool:
+        """One agent's answer as an embed, split across several only when it must be."""
+        try:
+            parts = chat_bridge.split(body, EMBED_LIMIT)
+            total = len(parts)
+            for i, part in enumerate(parts, 1):
+                embed = discord.Embed(
+                    title=title[:250] + (f"  ({i}/{total})" if total > 1 else ""),
+                    description=part, colour=_colour(colour))
+                if footer:
+                    embed.set_footer(text=footer[:2040])
+                await channel.send(embed=embed)
+            return True
+        except Exception as err:
+            print(f"[discord] card failed: {type(err).__name__}: {err}", flush=True)
+            return await send(f"**{title}**\n\n{body}")
+
     # Discord spells bold with two asterisks and italic with one; WhatsApp uses one and
     # an underscore. Getting this wrong shows up as literal asterisks in the chat.
     return chat_bridge.Transport(name="discord", limit=LIMIT, send=send,
-                                 bold="**", italic="*")
+                                 bold="**", italic="*",
+                                 card=card, status=status, card_limit=EMBED_LIMIT)
 
 
 async def _build():
@@ -93,37 +154,22 @@ async def _build():
         """Answer a slash command through the shared bridge.
 
         Discord gives an interaction three seconds to be acknowledged or it shows "the
-        application did not respond", and a dispatch takes minutes. So every command
-        defers first and speaks afterwards. Results go to the channel rather than as
-        interaction follow-ups, because a follow-up token expires after fifteen minutes
-        and a long run would lose its own output.
+        application did not respond", and a dispatch takes minutes. So the interaction is
+        acknowledged immediately and everything after that goes to the channel through the
+        ordinary transport — which means slash commands get the same embeds and the same
+        edited status line as plain messages, instead of a second, worse rendering path.
+        Follow-up tokens also expire after fifteen minutes, which a long run would outlive.
         """
         if not allowed(interaction.user.id):
             await interaction.response.send_message(
                 "Not on this bot's allowlist.", ephemeral=True)
             return
-        await interaction.response.defer(thinking=True)
+        try:
+            await interaction.response.send_message("On it.", ephemeral=True)
+        except Exception:
+            pass
         convo = f"discord:{interaction.channel_id}"
-        t = _transport(interaction.channel)
-        acked = False
-
-        async def send(body: str) -> bool:
-            nonlocal acked
-            parts = chat_bridge.split(body, LIMIT)
-            for i, part in enumerate(parts):
-                try:
-                    if not acked:
-                        await interaction.followup.send(part)
-                        acked = True
-                    else:
-                        await interaction.channel.send(part)
-                except Exception as err:
-                    print(f"[discord] send failed: {type(err).__name__}: {err}", flush=True)
-                    return False
-            return True
-
-        t.send = send
-        await chat_bridge.handle(convo, text, t)
+        await chat_bridge.handle(convo, text, _transport(interaction.channel))
 
     @tree.command(name="help", description="What this bot can do")
     async def _help(interaction) -> None:

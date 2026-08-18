@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -43,12 +44,36 @@ class Transport:
     send: Callable[[str], Awaitable[bool]]
     bold: str = "*"          # WhatsApp uses *one*; Discord uses **two**
     italic: str = "_"
+    # Optional richer surfaces. A platform that has them gets structure; one that does
+    # not falls back to plain text, so nothing here has to know which is which.
+    #   card   — one titled, coloured block (a Discord embed)
+    #   status — a single line that is *edited* in place as the run progresses, rather
+    #            than a new message per wave
+    card: Callable[..., Awaitable[bool]] | None = None
+    status: Callable[[str], Awaitable[bool]] | None = None
+    # Embeds hold far more than a plain message, so the split budget differs by surface.
+    card_limit: int = 0
 
     def b(self, text: str) -> str:
         return f"{self.bold}{text}{self.bold}"
 
     def i(self, text: str) -> str:
         return f"{self.italic}{text}{self.italic}"
+
+    async def show(self, title: str, body: str, colour: str = "", footer: str = "") -> bool:
+        """One agent's answer, as structured as this platform allows."""
+        if self.card:
+            return await self.card(title, body, colour, footer)
+        head = f"✅ {self.b(title)}"
+        if footer:
+            head += f"\n{self.i(footer)}"
+        return await self.send(f"{head}\n\n{body}")
+
+    async def progress(self, text: str) -> bool:
+        """Run progress. Edited in place where possible, appended where not."""
+        if self.status:
+            return await self.status(text)
+        return await self.send(text)
 
 
 def split(text: str, limit: int) -> list[str]:
@@ -84,11 +109,23 @@ def split(text: str, limit: int) -> list[str]:
         parts.append(buf.strip())
 
     parts = [p for p in parts if p]
-    if len(parts) > 1:
-        total = len(parts)
-        # The counter costs characters, so it is budgeted for by the caller's limit.
-        parts = [f"({i}/{total}) {p}" for i, p in enumerate(parts, 1)]
-    return parts
+
+    # Re-balance code fences. A part that ends inside a ``` block renders as broken
+    # Markdown and swallows everything after it, so the block is closed at the cut and
+    # reopened — with its language — at the top of the next part. Coder agents produce
+    # exactly this shape often enough to be worth the bookkeeping.
+    fixed, carry = [], ""
+    for part in parts:
+        body = carry + part
+        fences = re.findall(r"^```([A-Za-z0-9_+-]*)", body, re.M)
+        if len(fences) % 2:
+            lang = fences[-1]
+            body += "\n```"
+            carry = f"```{lang}\n"
+        else:
+            carry = ""
+        fixed.append(body)
+    return fixed
 
 
 # One run per conversation. A second task while one is going would interleave two sets of
@@ -191,10 +228,27 @@ def _set_mode(convo: str, arg: str, t: Transport) -> str:
 
 
 async def _run_task(convo: str, task: str, t: Transport) -> None:
-    """Stream one dispatch into a conversation."""
+    """Stream one dispatch into a conversation.
+
+    Progress is one line that gets rewritten — wave, who is working, then the summary —
+    rather than a new message per event. On a phone a dozen status messages bury the
+    thing you actually wanted, which is the answers.
+    """
     outputs: dict[str, str] = {}
-    labels: dict[str, str] = {}
+    agents_seen: dict[str, dict] = {}
     sent_any = False
+    waves = 0
+
+    def board(note: str = "") -> str:
+        """The live picture of the run, rebuilt from scratch each time."""
+        icon = {"running": "⏳", "done": "✅", "failed": "⚠️"}
+        rows = [f"{icon.get(a.get('state', 'running'), '•')} {t.b(a['label'])} — "
+                f"{a['provider']} / {a['model']}"
+                for a in agents_seen.values()]
+        head = f"🐙 {t.b(task[:120])}"
+        mid = f"Wave {waves} · {len(agents_seen)} agent(s)" if waves else "Planning…"
+        return "\n".join([head, mid] + rows + ([note] if note else []))
+
     try:
         mode = _mode.get(convo)
         async for line in octopus.dispatch(_key(), task, None,
@@ -207,53 +261,65 @@ async def _run_task(convo: str, task: str, t: Transport) -> None:
                 continue
             kind = e.get("event")
 
-            if kind == "wave":
-                head = [f"{t.b('Wave ' + str(e['n']))} — "
-                        f"{len(e['agents'])} agent(s) in parallel"]
+            if kind == "status":
+                await t.progress(f"🐙 {t.i(e.get('detail', ''))}")
+
+            elif kind == "wave":
+                waves = e["n"]
                 for a in e["agents"]:
-                    model = providers.bare(a["model"]) if a["model"] else "—"
-                    labels[a["id"]] = a["label"]
-                    head.append(f"• {t.b(a['label'])} — {a['provider']} / {model}")
-                await t.send("\n".join(head))
+                    agents_seen[a["id"]] = {
+                        "label": a["label"], "provider": a["provider"],
+                        "model": providers.bare(a["model"]) if a["model"] else "—",
+                        "colour": a.get("color", ""), "state": "running",
+                    }
+                await t.progress(board())
 
             elif kind == "chunk":
                 outputs[e["id"]] = outputs.get(e["id"], "") + e["text"]
 
             elif kind == "sources":
                 srcs = e.get("sources") or []
-                if srcs:
-                    await t.send(f"🔎 {t.b('Sources read')}\n"
-                                 + "\n".join(s["url"] for s in srcs[:5]))
+                if srcs and e["id"] in agents_seen:
+                    agents_seen[e["id"]]["sources"] = [s["url"] for s in srcs[:4]]
 
             elif kind == "done":
+                info = agents_seen.get(e["id"], {})
+                info["state"] = "done"
                 text = outputs.get(e["id"], "").strip()
+                await t.progress(board())
                 if text:
                     sent_any = True
-                    await t.send(f"✅ {t.b(labels.get(e['id'], e['id']))}\n\n{text}")
+                    secs = (e.get("latency_ms") or 0) / 1000
+                    foot = f"{info.get('provider', '')} · {info.get('model', '')} · {secs:.0f}s"
+                    if info.get("sources"):
+                        text += "\n\n" + t.b("Sources") + "\n" + "\n".join(info["sources"])
+                    await t.show(info.get("label", e["id"]), text,
+                                 info.get("colour", ""), foot)
 
             elif kind == "error":
-                title = labels.get(e.get("id", ""), e.get("id", "an agent"))
-                await t.send(f"⚠️ {t.b(title)} failed\n{e.get('detail', '')[:400]}")
+                info = agents_seen.get(e.get("id", ""), {})
+                info["state"] = "failed"
+                await t.progress(board(f"⚠️ {e.get('detail', '')[:200]}"))
 
             elif kind == "fatal":
-                await t.send(f"🛑 {e.get('detail', 'dispatch failed')}")
+                await t.progress(f"🛑 {e.get('detail', 'dispatch failed')}")
 
             elif kind == "complete":
                 _last_cost[convo] = e.get("cost", {})
-                split_by = ", ".join(f"{v} {k}" for k, v in (e.get("by_provider") or {}).items())
+                by = ", ".join(f"{v} {k}" for k, v in (e.get("by_provider") or {}).items())
                 cost = e.get("cost") or {}
                 money = "$%.4f" % cost["usd"] if cost.get("billable") else "free"
-                await t.send(
-                    f"🐙 {t.b('Done')} — {e['agents']} agent(s), {e['waves']} wave(s), "
-                    f"{e.get('ok', 0)} ok, {e.get('failed', 0)} failed"
-                    + (f"\n{split_by}" if split_by else "")
-                    + f"\n~{cost.get('tokens', 0)} tokens · {money}")
+                summary = (f"🐙 {t.b('Done')} — {e['agents']} agent(s), {e['waves']} wave(s), "
+                           f"{e.get('ok', 0)} ok, {e.get('failed', 0)} failed"
+                           + (f" · {by}" if by else "")
+                           + f" · ~{cost.get('tokens', 0)} tokens · {money}")
+                await t.progress(board(summary))
                 if not sent_any:
                     await t.send("No agent produced any text.")
     except asyncio.CancelledError:
-        await t.send("🛑 Stopped.")
+        await t.progress(board("🛑 Stopped."))
         raise
-    except Exception as err:                          # never leave the chat hanging
+    except Exception as err:
         await t.send(f"🛑 The run broke: {type(err).__name__}: {err}")
     finally:
         _runs.pop(convo, None)
@@ -311,6 +377,7 @@ async def handle(convo: str, text: str, t: Transport) -> None:
         return
 
     pin = _mode.get(convo, "auto")
-    await t.send(f"🐙 Working on it — routing {t.b(pin)}.\n"
-                 "I'll send each agent's answer as it lands.")
+    # Through progress(), not send(): this is the first version of the status line the
+    # run then keeps rewriting, so the acknowledgement costs no extra message.
+    await t.progress(f"🐙 Working on it — routing {t.b(pin)}…")
     _runs[convo] = asyncio.create_task(_run_task(convo, task=text, t=t))
