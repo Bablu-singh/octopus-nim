@@ -60,7 +60,7 @@ HEAVY = re.compile(
 
 # Words that mean the deliverable is small, whatever the subject matter is.
 LIGHT = re.compile(
-    r"\bquick\b|\bbrief\b|\bshort\b|one.liner|one line|single line|tl;?dr|\bsimple\b|"
+    r"\bquick\b|\bbrief\b|\bshort\b|one[- ]?liner?|single[- ]?line|tl;?dr|\bsimple\b|"
     r"\bjust\b|rename|typo|grammar|spell|rephrase|reword|rewrite this|tweak|"
     r"headline|subject line|tweet|caption|slogan|tagline|\bname\b|\btitle\b|"
     r"what is|what's|define\b|definition of|convert|format|\blist\b|bullet"
@@ -123,7 +123,7 @@ def rank(usable: set[str], heavy: bool) -> list[str]:
     it charges, and how it ties against its peers (`priority`), and the router reads that.
 
     Order of tie-breaks: right size, then free before paid, then cheaper before dearer,
-    then declared priority.
+    then least-loaded so far, then declared priority.
     """
     def key(name: str) -> tuple[int, int, float, int, str]:
         p = providers.BY_NAME.get(name)
@@ -138,7 +138,11 @@ def rank(usable: set[str], heavy: bool) -> list[str]:
         # free — which is exactly why it has to be encoded rather than assumed.
         paid = 0 if (p is None or p.free_tier) else 1
         rate = p.usd_out if p else 0.0
-        return (klass, paid, rate, p.priority if p else 50, name)
+        # Then spread. Two equally-suitable free tiers should share the work rather than
+        # one being drained until it 429s while the other sits idle — the free capacity
+        # on offer is the sum of them, not the larger of them. `priority` still decides
+        # when the load is level, so the declared preference wins every tie it used to.
+        return (klass, paid, rate, providers.load(name), p.priority if p else 50, name)
 
     return sorted(usable, key=key)
 

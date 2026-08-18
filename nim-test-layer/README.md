@@ -128,6 +128,37 @@ routing rotation — no code change, because Google publishes an OpenAI-compatib
 at `/v1beta/openai`. Two quirks are handled in `providers.py`: it answers a rejected key
 with `400` rather than `401`, and it prefixes listed ids with `models/`.
 
+## Cost, rate limits, and turning a provider off
+
+Everything reachable is free, so the budget is quota and wall-clock. Savings, largest
+first:
+
+| Knob | Default | Effect |
+|---|---|---|
+| `OCTOPUS_PLANNER_SKIP_BELOW` | `0.20` | Below this task weight, wave 1 is planned by keyword — one fewer completion on every trivial run |
+| `OCTOPUS_TOKEN_BUDGET` | `0` (off) | Hard ceiling on estimated tokens per dispatch; running agents still finish |
+| `LOCAL_MAX_TOKENS` | `700` | Caps local generation, which is what keeps small work faster than the network |
+| `<PROVIDER>_RPM` | `36` NIM, `12` Gemini, `0` local | Requests per minute, spaced evenly rather than burst-and-wait |
+
+Every dispatch reports its spend in the `complete` event — tokens per provider, and money
+only when something billable was involved. Counts are estimates: agents stream, and
+streaming responses carry no usage block.
+
+If a provider answers `429` anyway, it is stood down for as long as it asked
+(`Retry-After`, or the `retryDelay` in the body) and the router stops offering it until it
+recovers — visible as `cooling down` in `/api/providers`. A `429` never marks a model
+dead; it means we asked too often, not that the model broke.
+
+### Turning a provider off
+
+```bash
+ENABLE_NVIDIA=0   # or ENABLE_GEMINI=0, ENABLE_LOCAL=0
+```
+
+That provider leaves the pool and everything routes to what is left. This is the answer to
+"what if a free tier stops being free" — no code change, one restart to undo. It needed no
+new machinery because availability was always the only thing the router trusted.
+
 ## Listed is not the same as served
 
 `GET /v1/models` returns everything the catalog knows about, not what your key can

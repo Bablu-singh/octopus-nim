@@ -118,6 +118,12 @@ class Provider:
     usd_in: float = 0.0
     usd_out: float = 0.0
     free_tier: bool = True
+    # Requests per minute this provider is willing to take. 0 means "no limit worth
+    # enforcing" — that is local, where the only real constraint is the CPU and the
+    # semaphore in octopus.py already handles it. Free tiers publish small numbers and
+    # answer 429 when you exceed them, so the gate is set below the published figure:
+    # being throttled costs a whole retry, waiting 200ms costs 200ms.
+    rpm: int = 0
     # One cheap model used only to prove a credential works; see `_key_works`.
     probe_model: str = ""
     key_override: str | None = field(default=None, repr=False)
@@ -219,6 +225,7 @@ PROVIDERS: list[Provider] = [
         max_tokens_cap=int(os.getenv("LOCAL_MAX_TOKENS", "700")),
         prefers="small",
         priority=0,
+        rpm=int(os.getenv("LOCAL_RPM", "0")),
     ),
     Provider(
         name="nvidia",
@@ -238,6 +245,7 @@ PROVIDERS: list[Provider] = [
         probe_model=os.getenv("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct"),
         prefers="large",
         priority=10,
+        rpm=int(os.getenv("NVIDIA_RPM", "36")),
     ),
     Provider(
         name="gemini",
@@ -263,6 +271,7 @@ PROVIDERS: list[Provider] = [
         id_prefix="models/",
         prefers="large",
         priority=20,
+        rpm=int(os.getenv("GEMINI_RPM", "5")),
     ),
     Provider(
         name="openai",
@@ -294,6 +303,125 @@ PROVIDERS: list[Provider] = [
 ]
 
 BY_NAME: dict[str, Provider] = {p.name: p for p in PROVIDERS}
+
+
+class RateLimiter:
+    """Spaces requests to one provider so a free tier is never the thing that breaks.
+
+    A minimum interval rather than a burst bucket, deliberately. A burst bucket lets a
+    wave of eight agents fire at once and then sit out the rest of the minute, which is
+    exactly the shape that trips a per-minute quota; spacing them keeps every one of
+    them served. The wait is short enough to disappear next to a completion.
+    """
+
+    def __init__(self, rpm: int) -> None:
+        self.interval = 60.0 / rpm if rpm > 0 else 0.0
+        self._lock = asyncio.Lock()
+        self._next = 0.0
+
+    async def acquire(self) -> None:
+        if not self.interval:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            wait = self._next - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                now = time.monotonic()
+            self._next = now + self.interval
+
+
+# Keyed by provider name, not held on the Provider itself: `with_key` copies a provider
+# per request, and a limiter living on the copy would gate nothing.
+_limiters: dict[str, RateLimiter] = {}
+# When a provider told us to back off, and why. Honouring this is the difference between
+# a 429 costing one wasted request and a 429 costing every request in the wave.
+_cooldown: dict[str, tuple[float, str]] = {}
+
+
+def limiter(p: Provider) -> RateLimiter:
+    lim = _limiters.get(p.name)
+    if lim is None or lim.interval != (60.0 / p.rpm if p.rpm > 0 else 0.0):
+        lim = _limiters[p.name] = RateLimiter(p.rpm)
+    return lim
+
+
+# How many agents each provider has been handed. Used to spread heavy work across the
+# free tiers instead of draining one: two providers at 50% each hit a per-minute quota
+# far less often than one at 100%, and the free capacity available is the sum, not the
+# maximum. Reset per process, which is the right scope — it is a load balancer, not a
+# billing record.
+_load: dict[str, int] = {}
+
+
+def note_use(name: str | None, n: int = 1) -> None:
+    if name:
+        _load[name] = _load.get(name, 0) + n
+
+
+def load(name: str) -> int:
+    return _load.get(name, 0)
+
+
+# Consecutive throttles per provider, so repeated 429s back off instead of retrying into
+# the same wall. Cleared by any successful call.
+_strikes: dict[str, int] = {}
+
+
+def cool(name: str, seconds: float, why: str = "") -> None:
+    """Stand a provider down. The router simply stops seeing it until it recovers.
+
+    Backs off exponentially on repeated throttling. A provider's own `Retry-After` is a
+    floor, not a ceiling: honouring 30s literally and then retrying got a second 429
+    immediately, because the limit that bit was a per-minute one and 30s had not cleared
+    it. Doubling per strike costs one slow run and then stops wasting requests entirely.
+    """
+    _strikes[name] = _strikes.get(name, 0) + 1
+    backoff = seconds * (2 ** (_strikes[name] - 1))
+    seconds = max(1.0, min(backoff, 3600.0))
+    until = time.time() + seconds
+    have = _cooldown.get(name)
+    if not have or until > have[0]:
+        _cooldown[name] = (until, f"{why or 'rate limited'} (strike {_strikes[name]})")
+
+
+def note_ok(name: str | None) -> None:
+    """A call got through, so the provider is healthy again."""
+    if name:
+        _strikes.pop(name, None)
+
+
+def cooldown_left(name: str) -> float:
+    slot = _cooldown.get(name)
+    if not slot:
+        return 0.0
+    left = slot[0] - time.time()
+    if left <= 0:
+        _cooldown.pop(name, None)
+        return 0.0
+    return left
+
+
+def cooldown_why(name: str) -> str:
+    slot = _cooldown.get(name)
+    return slot[1] if slot else ""
+
+
+def _retry_after(resp: httpx.Response) -> float:
+    """Seconds the provider asked us to wait, or a sane default.
+
+    Retry-After may be seconds or an HTTP date; Google also returns the delay inside the
+    error body. Anything unparseable falls back to a fixed pause, because guessing low
+    here means walking straight back into the same 429.
+    """
+    raw = (resp.headers.get("Retry-After") or "").strip()
+    if raw.isdigit():
+        return float(raw)
+    body = resp.text[:600]
+    m = re.search(r'"?retryDelay"?[":\s]+"?(\d+(?:\.\d+)?)s', body)
+    if m:
+        return float(m.group(1))
+    return 30.0
 
 
 def get(name: str) -> Provider:
@@ -359,6 +487,11 @@ def transport_error(err: Exception, p: Provider, model: str | None = None) -> Pr
 
 
 def _raise_for_status(resp: httpx.Response, body: str, p: Provider) -> None:
+    if resp.status_code == 429:
+        wait = _retry_after(resp)
+        cool(p.name, wait, f"429 from {p.label}; asked for {wait:.0f}s")
+    elif resp.status_code < 400:
+        note_ok(p.name)
     if resp.status_code >= 400:
         detail = body.strip()[:600] or resp.reason_phrase
         raise ProviderError(resp.status_code, detail, p.name)
@@ -436,6 +569,7 @@ async def reachable(p: Provider) -> str:
 
 async def list_models(p: Provider) -> Timed:
     _require_openai_wire(p)
+    await limiter(p).acquire()
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=p.timeout) as client:
@@ -470,9 +604,15 @@ async def is_alive(p: Provider, model: str, client: httpx.AsyncClient | None = N
     }
     owned = client is None
     client = client or httpx.AsyncClient(timeout=p.probe)
+    await limiter(p).acquire()
     try:
         resp = await client.post(f"{p.base_url}/chat/completions", headers=p.headers(),
                                  json=body, timeout=p.probe)
+        if resp.status_code == 429:
+            # Being throttled says nothing about whether this model works. Treating it
+            # as dead would drop a perfectly good model for the rest of the cache TTL.
+            cool(p.name, _retry_after(resp), f"429 while probing {p.label}")
+            return False
         return resp.status_code == 200 and bool(extract_text(resp.json()).strip())
     except (httpx.HTTPError, ValueError, ProviderError):
         return False
@@ -502,6 +642,7 @@ async def chat(model: str, prompt: str, system: str | None = None,
     p = with_key(split(model)[0], key)
     _require_openai_wire(p)
     body = _body(p, model, prompt, system, temperature, max_tokens, stream=False)
+    await limiter(p).acquire()
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=p.timeout) as client:
@@ -521,6 +662,7 @@ async def chat_stream(model: str, prompt: str, system: str | None = None,
     p = with_key(split(model)[0], key)
     _require_openai_wire(p)
     body = _body(p, model, prompt, system, temperature, max_tokens, stream=True)
+    await limiter(p).acquire()
     try:
         async with httpx.AsyncClient(timeout=p.timeout) as client:
             async with client.stream("POST", f"{p.base_url}/chat/completions",
@@ -603,7 +745,10 @@ async def survey(key_override: str | None = None, force: bool = False) -> list[d
     remote provider would make every catalog read wait for it.
     """
     slot = _survey.get(key_fingerprint(key_override or ""))
-    if slot and not force and time.time() - slot[0] < SURVEY_TTL:
+    cooling = any(cooldown_left(p.name) > 0 for p in PROVIDERS)
+    # A cached "up" for a provider that has since been throttled would send a whole wave
+    # straight back into the 429 it was standing down from.
+    if slot and not force and not cooling and time.time() - slot[0] < SURVEY_TTL:
         return slot[1]
 
     def scoped(p: Provider) -> Provider:
@@ -612,7 +757,8 @@ async def survey(key_override: str | None = None, force: bool = False) -> list[d
     def has_key(p: Provider) -> bool:
         return scoped(p).has_key()
 
-    testable = [p for p in PROVIDERS if p.enabled and has_key(p) and p.wire == "openai"]
+    testable = [p for p in PROVIDERS if p.enabled and has_key(p) and p.wire == "openai"
+                and cooldown_left(p.name) <= 0]
     checks = await asyncio.gather(*(reachable(scoped(p)) for p in testable),
                                   return_exceptions=True)
     state_of = {p.name: (c if isinstance(c, str) else "unreachable")
@@ -627,10 +773,16 @@ async def survey(key_override: str | None = None, force: bool = False) -> list[d
             state, note = "no key", f"Set {p.key_env} in .env."
         elif p.wire != "openai":
             state, note = "no adapter", f"'{p.wire}' wire format is not implemented."
+        elif cooldown_left(p.name) > 0:
+            left = cooldown_left(p.name)
+            state = "cooling down"
+            note = f"{cooldown_why(p.name)} — back in {left:.0f}s."
         else:
             state = state_of.get(p.name, "unreachable")
             if state == "up":
                 note = p.blurb
+                if p.rpm:
+                    note += f" Gated to {p.rpm} req/min."
             elif state == "bad key":
                 note = (f"{p.key_env} was rejected — it is present but not valid for "
                         f"{p.label}.")

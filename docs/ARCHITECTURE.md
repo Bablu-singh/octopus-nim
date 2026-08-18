@@ -173,11 +173,57 @@ shows up as `bad key` at startup instead of as every agent failing `403` later.
 | Token cap | 700 | role default (1400–2000) | role default |
 | Parallelism | 2 (shares this CPU) | 6 | 6 |
 | `prefers` / `priority` | small / 0 | large / 10 | large / 20 |
+| Rate gate | ungated | 36 req/min | 12 req/min |
 | Gets | light work | heavy work, image generation, planning | heavy work, planning |
 
 NIM is the only one whose catalog is probed. It is the anomaly, not the rule: Ollama
 lists what is on disk and Gemini lists what it will serve, so probing either spends time
 or free-tier quota confirming something already true.
+
+---
+
+## Spending as little as possible
+
+Every provider in the table is free, so the budget being protected is quota and
+wall-clock, not money. Four mechanisms, in order of how much they save:
+
+| Mechanism | Saves |
+|---|---|
+| Planner skipped below weight 0.20 | one completion on every trivial dispatch |
+| Light tasks capped at one wave | the supervisor's call plus the agents it would invent |
+| Deliverable dedupe, one retry per slice | repeat work across waves |
+| Per-provider token caps, optional dispatch ceiling | runaway generation |
+
+The ledger then reports what was actually spent, per provider, in the `complete` event.
+Token counts are estimates — agents stream, and streaming responses carry no usage block
+— which is stated wherever they surface.
+
+Routing breaks ties by *right size, then free before paid, then cheaper, then priority*.
+Among today's providers the cost terms are a no-op, which is precisely why they are
+encoded rather than assumed: enabling a paid provider later must add a fallback, not
+silently capture every heavy agent.
+
+## Respecting rate limits
+
+```mermaid
+flowchart LR
+    A["agent wants to call"] --> G{"gate:<br/>60/rpm since<br/>last call?"}
+    G -->|"too soon"| W["sleep the remainder"] --> C
+    G -->|ok| C["send request"]
+    C --> R{"429?"}
+    R -->|no| D["stream the answer"]
+    R -->|yes| CD["cool provider for<br/>Retry-After seconds"]
+    CD --> RR["provider leaves `usable`<br/>router picks another"]
+```
+
+Spacing rather than bursting is deliberate: a burst bucket lets a wave of eight agents
+fire at once and then sit out the rest of the minute, which is exactly the shape that
+trips a per-minute quota. Waiting a few hundred milliseconds costs less than the retry
+that a `429` would have cost.
+
+A `429` is never treated as a broken model. The model stays in the verified set and the
+*provider* stands down, because the alternative — dropping the model — would both lose a
+working model and send the retry to a different model on the same throttled provider.
 
 ---
 

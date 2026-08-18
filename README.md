@@ -83,6 +83,45 @@ A provider is a base URL, an optional key, and a wire format. Models are address
 `provider:model` everywhere above `providers.py`, so adding one is a row in a registry —
 not a refactor of the octopus, the tentacles, or the UI.
 
+## Cost, quota and switching a provider off
+
+Everything reachable today is free, so "cost" here means quota and wall-clock rather
+than money — and the cheapest call is the one that never happens:
+
+- **Trivial tasks skip the planner.** A one-line question does not need a planning
+  completion to establish that it is one agent's work. Below a weight of 0.20 the first
+  wave is planned by keyword, saving a whole call on exactly the runs where that call was
+  the largest share of the cost.
+- **Work already done is never redone**, a failed slice gets exactly one retry, and a
+  light task never grows past one wave.
+- **Token caps per provider**, and an optional hard ceiling for a whole dispatch
+  (`OCTOPUS_TOKEN_BUDGET`).
+- **Every run reports what it spent** — tokens per provider, and money only if something
+  billable was actually involved. Counts are estimates: agents stream, and streaming
+  responses carry no usage block.
+- **Free before paid** in the routing order, so enabling a paid provider later adds a
+  fallback rather than quietly becoming the default.
+
+**Rate limits are respected rather than discovered.** Each provider is gated to a
+requests-per-minute figure set below its published ceiling, spaced evenly rather than
+burst-and-wait — a burst of eight agents is the shape that trips a per-minute quota. If a
+`429` arrives anyway, the provider is stood down for as long as it asked for
+(`Retry-After`, or the delay in the error body), and the router simply stops offering it
+until it recovers. A `429` never marks a model dead: it means we asked too often, not that
+the model is broken.
+
+**If a free tier stops being free**, set `ENABLE_NVIDIA=0` (or `ENABLE_GEMINI=0`,
+`ENABLE_LOCAL=0`). That provider leaves the pool and everything routes to what is left —
+no code change, nothing to uninstall, and one restart to undo. Availability was always the
+only thing the router trusted, so this needed no new machinery:
+
+```
+ENABLE_NVIDIA=0
+  nvidia   disabled       Switched off — set ENABLE_NVIDIA=1 to use it.
+  heavy work  -> gemini
+  light work  -> local
+```
+
 ## The part that makes it work
 
 `GET /v1/models` advertises far more than a key can run. On the key this was built

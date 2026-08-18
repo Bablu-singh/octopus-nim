@@ -116,10 +116,12 @@ TENTACLES: list[Tentacle] = [
                     "muse-glimmer", "inkling", "kimi-k2", "glm-5", "llama-3.3-70b",
                     "llama-3.1-405b", "llama-3.1-70b", "mixtral-8x22b", "nemotron-4-340b",
                     "qwen2.5-72b", "llama-3.1-8b",
-                    # Gemini: the '-latest' aliases first. Google retires dated model
-                    # names — 'gemini-2.0-flash' already 404s with a note pointing at its
-                    # successor — and an alias is the one name that survives that.
-                    "gemini-pro-latest", "gemini-flash-latest", "gemini-2.5-pro",
+                    # Gemini: the '-latest' aliases first, because Google retires dated
+                    # names — 'gemini-2.0-flash' already 404s pointing at its successor.
+                    # Flash before pro: the free tier gives flash several times the pro
+                    # quota, and on these agents being throttled costs far more than the
+                    # quality difference is worth.
+                    "gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash",
                     # Local. Only reachable when the pool is scoped to the local provider,
                     # so their position after the hosted names costs nothing.
                     "qwen2.5", "llama3.2", "mistral", "phi"],
@@ -140,7 +142,7 @@ TENTACLES: list[Tentacle] = [
         candidates=["qwen3-coder", "qwen2.5-coder-32b", "codestral", "deepseek-coder",
                     "laguna", "codellama-70b", "granite-34b-code", "starcoder2",
                     "gpt-oss-120b", "nemotron-3-super", "deepseek-r1", "llama-3.3-70b",
-                    "gemini-pro-latest", "gemini-flash-latest", "gemini-2.5-pro",
+                    "gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash",
                     # Local: a pulled coder model wins if there is one, else the general
                     # 7B, which handles a short function better than the 3B does.
                     "qwen2.5-coder", "deepseek-coder-v2", "codellama", "qwen2.5", "llama3.2"],
@@ -208,7 +210,7 @@ TENTACLES: list[Tentacle] = [
         candidates=["nemotron-3-ultra", "deepseek-r1", "qwq-32b", "nemotron-ultra",
                     "llama-3.3-nemotron-super-49b", "gpt-oss-120b", "nemotron-3-super",
                     "nemotron-70b", "magistral", "llama-3.3-70b",
-                    "gemini-pro-latest", "gemini-flash-latest", "gemini-2.5-pro",
+                    "gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash",
                     # Local: the 7B first — analysis is where the 3B's ceiling shows.
                     "qwen2.5", "llama3.2", "mistral"],
         fallback_families=["reasoning", "chat"],
@@ -386,7 +388,7 @@ PLANNER_PREFERENCE = [
     "nemotron-3-super", "gpt-oss-120b", "llama-3.3-70b", "mistral-large",
     "nemotron-3.5-lightning", "step-3.7-flash", "gpt-oss-20b", "nemotron-3-ultra",
     "llama-3.1-70b", "llama-3.1-8b",
-    "gemini-pro-latest", "gemini-flash-latest", "gemini-2.5-pro",
+    "gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash",
     # Local, for when nothing hosted is reachable. The 7B first: the 3B plans a
     # two-part task into six agents, and every one of those costs a completion.
     "qwen2.5", "mistral", "llama3.2",

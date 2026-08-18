@@ -395,13 +395,24 @@ async def _run_agent(key: str | None, agent: dict, queue: asyncio.Queue,
             raise
         except providers.ProviderError as err:
             # These say the binding is bad rather than the prompt, so the caller should
-            # swap models rather than retry the same one. 503 is capacity, not breakage.
-            at_fault = err.status in (404, 429, 500, 502, 503, 504)
+            # swap models rather than retry the same one.
+            #
+            # 429 is the exception: it means we asked too often, not that this model is
+            # broken. Forgetting the model would drop a working one for the rest of the
+            # cache TTL and, worse, send the retry at a *different* model on the same
+            # throttled provider. `providers` has already put that provider on cooldown,
+            # so the right move is to leave the model alone and let the router pick a
+            # provider that is not currently standing down.
+            throttled = err.status == 429
+            at_fault = err.status in (404, 500, 502, 503, 504)
             if at_fault:
                 _mark_dead(key, model)
-            await queue.put(_event("error", id=aid, model=model, provider=prov,
-                                   model_at_fault=at_fault,
-                                   detail=f"HTTP {err.status}: {err.detail[:300]}"))
+            await queue.put(_event(
+                "error", id=aid, model=model, provider=prov,
+                model_at_fault=at_fault, throttled=throttled,
+                detail=(f"{prov} is rate limited — standing it down for "
+                        f"{providers.cooldown_left(prov or ''):.0f}s and re-routing."
+                        if throttled else f"HTTP {err.status}: {err.detail[:300]}")))
         except Exception as err:  # keep one failed agent from killing the others
             await queue.put(_event("error", id=aid, model=model, provider=prov,
                                    model_at_fault=False,
@@ -498,8 +509,13 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
         return provider, bound.get(provider, {}).get(a["role"]), why
 
     def _exhausted() -> set[str]:
-        """Providers with nothing left to bind, so the router stops offering them."""
-        return {p for p in usable if not any(bound.get(p, {}).values())}
+        """Providers the router should stop offering: nothing left to bind, or throttled.
+
+        Re-read every time rather than cached, because a cooldown set part-way through a
+        wave has to affect the very next agent enlisted, not the next dispatch.
+        """
+        return ({p for p in usable if not any(bound.get(p, {}).values())}
+                | {p for p in usable if providers.cooldown_left(p) > 0})
 
     def enlist(batch: list[dict]) -> list[dict]:
         """Give each planned agent a unique id, a provider, and a model, and start it.
@@ -528,6 +544,10 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
             slices[sid] = "running"
             counts[a["role"]] = counts.get(a["role"], 0) + 1
             provider, model, why = route(a)
+            # Counted at enlist time, not at completion: the next agent in this same wave
+            # has to see the load this one just added, or a wave of six would all be
+            # routed to whichever provider happened to be idle when the wave began.
+            providers.note_use(provider)
             agent = {**a, "id": f"{a['role']}-{counts[a['role']]}",
                      "provider": provider, "model": model, "route_why": why}
             owner[agent["id"]] = sid
