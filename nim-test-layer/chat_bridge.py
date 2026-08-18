@@ -108,7 +108,7 @@ def help_text(t: Transport) -> str:
 Send any task and the agent pool runs it on the host machine:
 {t.i('draft a release note for v2 and list the migration risks')}
 
-{t.b('Commands')}
+{t.b('Commands')} (either / or ! works)
 /help — this message
 /status — providers, routing mode, web access
 /models — what each role is bound to, per provider
@@ -259,12 +259,19 @@ async def _run_task(convo: str, task: str, t: Transport) -> None:
         _runs.pop(convo, None)
 
 
+# Discord's client swallows anything beginning with '/' and tries to match it against
+# registered application commands — so a '/help' typed there never arrives as a message,
+# and the user sees "the application did not respond". '!' is accepted for exactly that
+# reason, and both are treated identically everywhere else.
+PREFIXES = ("/", "!")
+
+
 def is_command(text: str) -> bool:
-    return text.strip().startswith("/")
+    return text.strip().startswith(PREFIXES)
 
 
 def command_of(text: str) -> tuple[str, str]:
-    """'/mode local' -> ('mode', 'local')"""
+    """'/mode local' or '!mode local' -> ('mode', 'local')"""
     head, _, rest = text.strip()[1:].strip().partition(" ")
     return head.lower(), rest.strip()
 

@@ -75,6 +75,7 @@ def _transport(channel) -> chat_bridge.Transport:
 async def _build():
     """Construct the client. Imported lazily so the app runs without discord.py."""
     import discord
+    from discord import app_commands
 
     intents = discord.Intents.default()
     # Reading ordinary message text is a privileged intent and has to be switched on in
@@ -83,17 +84,105 @@ async def _build():
     intents.message_content = True
 
     client = discord.Client(intents=intents)
+    tree = app_commands.CommandTree(client)
+
+    def allowed(user_id: int) -> bool:
+        return str(user_id) in ALLOWED
+
+    async def run(interaction, text: str) -> None:
+        """Answer a slash command through the shared bridge.
+
+        Discord gives an interaction three seconds to be acknowledged or it shows "the
+        application did not respond", and a dispatch takes minutes. So every command
+        defers first and speaks afterwards. Results go to the channel rather than as
+        interaction follow-ups, because a follow-up token expires after fifteen minutes
+        and a long run would lose its own output.
+        """
+        if not allowed(interaction.user.id):
+            await interaction.response.send_message(
+                "Not on this bot's allowlist.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        convo = f"discord:{interaction.channel_id}"
+        t = _transport(interaction.channel)
+        acked = False
+
+        async def send(body: str) -> bool:
+            nonlocal acked
+            parts = chat_bridge.split(body, LIMIT)
+            for i, part in enumerate(parts):
+                try:
+                    if not acked:
+                        await interaction.followup.send(part)
+                        acked = True
+                    else:
+                        await interaction.channel.send(part)
+                except Exception as err:
+                    print(f"[discord] send failed: {type(err).__name__}: {err}", flush=True)
+                    return False
+            return True
+
+        t.send = send
+        await chat_bridge.handle(convo, text, t)
+
+    @tree.command(name="help", description="What this bot can do")
+    async def _help(interaction) -> None:
+        await run(interaction, "/help")
+
+    @tree.command(name="status", description="Providers, routing mode, web access")
+    async def _status(interaction) -> None:
+        await run(interaction, "/status")
+
+    @tree.command(name="models", description="What each role is bound to, per provider")
+    async def _models(interaction) -> None:
+        await run(interaction, "/models")
+
+    @tree.command(name="cost", description="What the last run spent")
+    async def _cost(interaction) -> None:
+        await run(interaction, "/cost")
+
+    @tree.command(name="stop", description="Cancel the run in progress")
+    async def _stop(interaction) -> None:
+        await run(interaction, "/stop")
+
+    @tree.command(name="mode", description="Pin where work goes")
+    @app_commands.describe(where="auto, local, nvidia or gemini")
+    async def _mode(interaction, where: str) -> None:
+        await run(interaction, f"/mode {where}")
+
+    @tree.command(name="web", description="Search the web (no model involved)")
+    @app_commands.describe(query="what to search for")
+    async def _web(interaction, query: str) -> None:
+        await run(interaction, f"/web {query}")
+
+    @tree.command(name="task", description="Run a task across the agent pool")
+    @app_commands.describe(task="what you want done")
+    async def _task(interaction, task: str) -> None:
+        await run(interaction, task)
 
     @client.event
     async def on_ready() -> None:
         print(f"[discord] connected as {client.user} — "
               f"{len(ALLOWED)} allowed user(s)", flush=True)
+        # Per-guild sync appears immediately; a global sync can take an hour to propagate.
+        for guild in client.guilds:
+            try:
+                tree.copy_global_to(guild=guild)
+                synced = await tree.sync(guild=guild)
+                print(f"[discord] {len(synced)} slash commands in {guild.name}", flush=True)
+            except Exception as err:
+                # Almost always a missing 'applications.commands' scope on the invite.
+                # Not fatal: '!' commands and plain text still work.
+                print(f"[discord] could not register slash commands in {guild.name}: "
+                      f"{type(err).__name__}: {err}", flush=True)
+                print("[discord] re-invite with scope=bot+applications.commands to fix; "
+                      "meanwhile use !help", flush=True)
 
     @client.event
     async def on_message(message) -> None:
         if message.author.bot or message.author == client.user:
             return
-        if str(message.author.id) not in ALLOWED:
+        if not allowed(message.author.id):
             return                                    # silence, not an error
         if CHANNELS and str(message.channel.id) not in CHANNELS:
             return
