@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 # timeouts — doing it here instead would run too late to affect those constants.
 import nim_client as nim
 import octopus
+import discordbot
 import providers
 import routing
 import wa_bridge
@@ -61,10 +62,19 @@ async def lifespan(_: FastAPI):
             say(f"catalog warm failed ({type(err).__name__}) — it will be read on demand")
 
     task = asyncio.create_task(warm())
+
+    # The Discord bot lives in this process and this event loop. Its gateway is an
+    # outbound WebSocket, so unlike the WhatsApp webhook it needs no public URL, no
+    # tunnel and no inbound port — which is why it is the front door worth reaching for.
+    ok, why = discordbot.configured()
+    say(f"discord: {'starting' if ok else 'off'} — {why}")
+    discordbot.launch()
+
     try:
         yield
     finally:
         task.cancel()
+        await discordbot.shutdown()
 
 
 app = FastAPI(title="Octopus", version="2.0.0", lifespan=lifespan)
@@ -274,6 +284,12 @@ async def whatsapp_health() -> dict:
         "allowed_numbers": len(whatsapp.ALLOWED),
         "active_runs": sum(1 for t in wa_bridge._runs.values() if not t.done()),
     }
+
+
+@app.get("/api/discord/health")
+async def discord_health() -> dict:
+    """Is the bot connected? Never returns the token."""
+    return discordbot.status()
 
 
 @app.get("/api/catalog")

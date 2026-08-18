@@ -4,7 +4,7 @@ A local multi-agent console. Describe a task; it works out what kind of work it 
 splits it into as many agents as the task warrants, runs them in parallel, and decides
 for each one whether it should run **on your machine** or **on a hosted free tier**.
 
-Drive it from a browser, or from **WhatsApp on your phone**.
+Drive it from a browser, from **Discord**, or from **WhatsApp**.
 
 **[Live demo →](https://bablu-singh.github.io/octopus-nim/)** — a recorded dispatch,
 replayed. GitHub Pages cannot run the Python backend, so the demo replays a real run
@@ -110,28 +110,34 @@ hostname.
 
 ## Drive it from your phone
 
-WhatsApp is a second front door to the same agent pool. Send a task, get each agent's
-answer back as it finishes.
+Two chat front doors, both reaching the same agent pool. **Discord is the one to reach
+for**: its gateway is an outbound WebSocket, so there is no public URL, no tunnel, no
+webhook signature and no inbound port — the app dials out. Setup is a bot token and an
+invite link, and it works from the Discord mobile app.
+
+WhatsApp is also supported, but needs a Meta app, a publicly reachable HTTPS callback via
+`cloudflared`, a signed webhook and a 24-hour messaging window.
 
 ```
 you  ▸ draft a release note for v2 and list the migration risks
-     ◂ Wave 1 — 2 agent(s) in parallel
+bot  ◂ Wave 1 — 2 agent(s) in parallel
        • ReleaseNote — local / qwen2.5:7b
        • MigrationRisks — nvidia / nemotron-3-super-120b
      ◂ ✅ ReleaseNote …
      ◂ 🐙 Done — 2 agents, 1 wave, 2 ok · ~3.1k tokens · free
 ```
 
-`/status`, `/models`, `/cost`, `/mode`, `/web`, `/stop`, `/help` — anything else is a task.
+`/status` `/models` `/cost` `/mode` `/web` `/stop` `/help` — anything else is a task.
 
-Meta's official Cloud API (free tier), reached through a `cloudflared` tunnel. It is a
-public endpoint that runs work on your machine, so three gates stand in front of it and
-none are optional: an HMAC signature check against your app secret, an allowlist of
-permitted numbers, and replay protection so Meta's retries cannot dispatch the pool twice.
-No app secret configured means every delivery is refused rather than trusted, and an empty
-allowlist disables the integration rather than opening it.
+Both doors are peers of the browser UI: all three call `octopus.dispatch()` directly, and
+one shared bridge turns dispatch events into messages, so a platform differs only in its
+message limit, how bold is spelled, and how a message is sent. Neither can drift from the
+other.
 
-Setup is in [nim-test-layer/README.md](nim-test-layer/README.md#driving-it-from-whatsapp).
+Neither answers anyone by default. An empty allowlist means the door connects and ignores
+everyone — deliberately useless rather than deliberately open.
+
+Setup for both is in [nim-test-layer/README.md](nim-test-layer/README.md).
 
 ## Cost, quota and switching a provider off
 

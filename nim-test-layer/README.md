@@ -172,6 +172,53 @@ are all blocked:
 public internet only — this would be reading your own machine.
 ```
 
+## Driving it from Discord
+
+The easy front door, and the one to reach for. Discord's gateway is an **outbound**
+WebSocket, so there is no public URL, no tunnel, no webhook signature and no inbound port
+— the app dials out and stays connected. It works from the Discord phone app, so this is
+mobile control without any of WhatsApp's setup.
+
+```
+you  ▸ draft a release note for v2 and list the migration risks
+bot  ◂ 🐙 Working on it — routing **auto**.
+     ◂ **Wave 1** — 2 agent(s) in parallel
+       • **ReleaseNote** — local / qwen2.5:7b
+       • **MigrationRisks** — nvidia / nemotron-3-super-120b
+     ◂ ✅ **ReleaseNote** …
+     ◂ 🐙 **Done** — 2 agents, 1 wave, 2 ok · ~3.1k tokens · free
+```
+
+Commands: `/status` `/models` `/cost` `/mode auto|local|nvidia|gemini` `/web <query>`
+`/stop` `/help`. Anything else is a task.
+
+### Setting it up
+
+1. [discord.com/developers/applications](https://discord.com/developers/applications) →
+   **New Application** → **Bot** → *Reset Token* and copy it.
+2. On the Bot page, turn on **MESSAGE CONTENT INTENT**. Without it the bot connects and
+   sees every message as empty — which looks like being ignored rather than like a
+   missing setting.
+3. **OAuth2 → URL Generator** → scope `bot`, permissions *Send Messages* and
+   *Read Message History*. Open the URL to invite it.
+4. In Discord: *Settings → Advanced → Developer Mode*, then right-click your own name →
+   **Copy User ID**.
+
+```bash
+ENABLE_DISCORD=1
+DISCORD_TOKEN=...          # from step 1
+DISCORD_ALLOWED=...        # your user ID from step 4
+```
+
+Restart and check `/api/discord/health`. An empty `DISCORD_ALLOWED` means the bot connects
+and ignores everyone — deliberately useless rather than deliberately open, the same choice
+made everywhere else here.
+
+`discord.py` is the one dependency in this project that is not hand-rolled. The gateway
+itself is easy; resume-after-disconnect, heartbeat drift and rate-limit buckets are not,
+and getting those wrong produces a bot that goes quiet at 3am rather than one that fails
+loudly.
+
 ## Driving it from WhatsApp
 
 The agent pool runs on your machine; WhatsApp becomes a second front door to it. Send a
@@ -280,6 +327,7 @@ for streaming it is the gap between chunks), and `NIM_PROBE_TIMEOUT`.
 | POST | `/api/web` | Search the web or read one page — no model involved |
 | GET/POST | `/api/whatsapp` | Meta webhook: handshake, then inbound messages |
 | GET | `/api/whatsapp/health` | Is WhatsApp wired up? Never returns the token or secret |
+| GET | `/api/discord/health` | Is the bot connected? Never returns the token |
 | GET | `/api/models` | Every model ID one provider lists (`?provider=local`) |
 | GET | `/api/catalog` | Which of those actually answer, grouped, with per-provider bindings |
 | POST | `/api/dispatch` | Plan and run an agent pool over one task, streamed as SSE |

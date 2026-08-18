@@ -24,12 +24,13 @@ config change rather than a refactor.
 flowchart TB
     subgraph clients["Front doors"]
         UI["static/octopus.html<br/><i>one SSE stream, cards light independently</i>"]
-        WA["WhatsApp<br/><i>phone, via Meta Cloud API</i>"]
+        DC["Discord<br/><i>outbound gateway — no tunnel</i>"]
+        WA["WhatsApp<br/><i>inbound webhook — needs a tunnel</i>"]
     end
 
     subgraph server["FastAPI — app.py"]
         API["/api/dispatch · /api/catalog · /api/providers<br>/api/route · /api/web · /api/whatsapp"]
-        BR["wa_bridge.py<br/><i>dispatch events → messages</i>"]
+        BR["chat_bridge.py<br/><i>dispatch events → messages</i>"]
     end
 
     subgraph brain["Orchestration"]
@@ -50,10 +51,10 @@ flowchart TB
         FUTURE["OpenAI · Anthropic<br/><i>registered, disabled — paid</i>"]
     end
 
-    UI --> API
-    WA -->|"signed webhook"| API
-    API --> BR --> OCT
-    API --> OCT
+    UI --> API --> OCT
+    WA -->|"signed webhook (inbound)"| API --> BR
+    DC <-->|"gateway WebSocket (outbound)"| BR
+    BR --> OCT
     OCT --> ROUTE
     OCT --> AG
     OCT --> WEB
@@ -242,7 +243,33 @@ visible in the transcript when something does go wrong.
 
 ---
 
-## The WhatsApp front door
+## The chat front doors
+
+`chat_bridge.py` is the only module that knows both chat and agents. A transport is three
+things — a message limit, how bold and italic are spelled, and how to send — plus nothing
+else, so adding a platform is a small job and two platforms cannot drift apart.
+
+| | Discord | WhatsApp |
+|---|---|---|
+| Connection | outbound gateway WebSocket | inbound HTTPS webhook |
+| Needs a public URL | no | yes — `cloudflared` |
+| Setup | bot token + invite link | Meta app, callback, verify token, app secret |
+| Messaging window | none | 24 hours after the user writes first |
+| Message limit | 2000 chars | 4096 chars |
+| Bold | `**two**` | `*one*` |
+
+Discord is the one to reach for. The direction of the connection is the whole reason:
+nothing has to be exposed for an outbound socket, so there is no tunnel, no signature to
+verify, and no inbound port on a machine that also holds the user's files.
+
+`discord.py` is the only non-hand-rolled dependency in the project. The gateway is easy;
+resume-after-disconnect, heartbeat drift and rate-limit buckets are not, and getting them
+wrong yields a bot that goes quiet at 3am rather than one that fails loudly.
+
+Neither door answers anyone by default — an empty allowlist connects and ignores
+everything, which is deliberately useless rather than deliberately open.
+
+## The WhatsApp webhook in particular
 
 `whatsapp.py` knows the Cloud API and nothing about agents. `octopus.py` knows agents and
 nothing about phones. `wa_bridge.py` is the only module that knows both — which is why

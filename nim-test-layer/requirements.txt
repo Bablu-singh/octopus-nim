@@ -3,3 +3,8 @@ uvicorn[standard]>=0.29
 httpx>=0.27
 python-dotenv>=1.0
 pydantic>=2.6
+
+# Optional: the Discord front door (ENABLE_DISCORD=1). The gateway itself is easy; resume
+# after disconnect, heartbeat drift and rate-limit buckets are not, and getting those
+# wrong yields a bot that goes quiet at 3am rather than one that fails loudly.
+discord.py>=2.4

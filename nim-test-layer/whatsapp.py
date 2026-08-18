@@ -157,42 +157,9 @@ def permitted(sender: str) -> bool:
 
 
 def split(text: str, limit: int = MAX_BODY) -> list[str]:
-    """Break a long answer into sendable pieces, on a boundary a reader would choose.
-
-    Paragraph first, then line, then a hard cut. An agent's answer is usually Markdown,
-    and slicing mid-sentence every 3500 characters makes it unreadable on a phone.
-    """
-    text = (text or "").strip()
-    if not text:
-        return []
-    if len(text) <= limit:
-        return [text]
-
-    parts, buf = [], ""
-    for para in text.split("\n\n"):
-        block = para if len(para) <= limit else ""
-        if not block:
-            # A single paragraph over the limit: fall back to lines, then to a hard cut.
-            for line in para.split("\n"):
-                while len(line) > limit:
-                    parts.append(line[:limit])
-                    line = line[limit:]
-                if len(buf) + len(line) + 1 > limit:
-                    parts.append(buf.strip())
-                    buf = ""
-                buf += line + "\n"
-            continue
-        if len(buf) + len(block) + 2 > limit:
-            parts.append(buf.strip())
-            buf = ""
-        buf += block + "\n\n"
-    if buf.strip():
-        parts.append(buf.strip())
-
-    if len(parts) > 1:
-        total = len(parts)
-        parts = [f"({i}/{total}) {p}" for i, p in enumerate(parts, 1)]
-    return parts
+    """Delegates to the shared splitter — the rules are not WhatsApp-specific."""
+    import chat_bridge
+    return chat_bridge.split(text, limit)
 
 
 async def _gate() -> None:
@@ -235,30 +202,3 @@ async def send(to: str, text: str) -> bool:
 
 
 # --- commands ---------------------------------------------------------------
-
-HELP = """🐙 *Octopus on WhatsApp*
-
-Send any task and the agent pool runs it on your machine:
-_"draft a release note for v2 and list the migration risks"_
-
-*Commands*
-/help — this message
-/status — providers, routing mode, web access
-/models — what each role is bound to, per provider
-/cost — what the last run spent
-/mode auto|local|nvidia|gemini — pin where work goes
-/web <query> — search the web, no model involved
-/stop — cancel the run in progress
-
-Anything not starting with / is treated as a task."""
-
-
-def is_command(text: str) -> bool:
-    return text.strip().startswith("/")
-
-
-def command_of(text: str) -> tuple[str, str]:
-    """('/mode local') -> ('mode', 'local')"""
-    body = text.strip()[1:].strip()
-    head, _, rest = body.partition(" ")
-    return head.lower(), rest.strip()
