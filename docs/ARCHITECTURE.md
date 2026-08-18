@@ -22,12 +22,14 @@ config change rather than a refactor.
 
 ```mermaid
 flowchart TB
-    subgraph browser["Browser"]
+    subgraph clients["Front doors"]
         UI["static/octopus.html<br/><i>one SSE stream, cards light independently</i>"]
+        WA["WhatsApp<br/><i>phone, via Meta Cloud API</i>"]
     end
 
     subgraph server["FastAPI — app.py"]
-        API["/api/dispatch · /api/catalog<br>/api/providers · /api/route · /api/web"]
+        API["/api/dispatch · /api/catalog · /api/providers<br>/api/route · /api/web · /api/whatsapp"]
+        BR["wa_bridge.py<br/><i>dispatch events → messages</i>"]
     end
 
     subgraph brain["Orchestration"]
@@ -48,7 +50,10 @@ flowchart TB
         FUTURE["OpenAI · Anthropic<br/><i>registered, disabled — paid</i>"]
     end
 
-    UI --> API --> OCT
+    UI --> API
+    WA -->|"signed webhook"| API
+    API --> BR --> OCT
+    API --> OCT
     OCT --> ROUTE
     OCT --> AG
     OCT --> WEB
@@ -65,6 +70,9 @@ flowchart TB
 
 `nim_client.py` still exists as a thin facade over `providers.py`, because the CLI
 self-test and the original key console are written against its signatures.
+
+The two front doors are peers. WhatsApp is not a wrapper around the browser UI — both call
+`octopus.dispatch()` directly, so neither can drift from the other.
 
 ---
 
@@ -231,6 +239,41 @@ Two mitigations, both structural rather than hopeful:
 
 Neither makes injection impossible. They remove the easy version and keep the boundary
 visible in the transcript when something does go wrong.
+
+---
+
+## The WhatsApp front door
+
+`whatsapp.py` knows the Cloud API and nothing about agents. `octopus.py` knows agents and
+nothing about phones. `wa_bridge.py` is the only module that knows both — which is why
+adding a phone changed nothing in the orchestrator.
+
+The interesting problem is shape mismatch: a dispatch takes minutes and streams, while
+WhatsApp is discrete messages. So a run reports as it goes — the plan when it is made,
+each agent's answer as it lands, a summary at the end — rather than going quiet and
+arriving as one wall of text. A failure is visible at the moment it happens.
+
+```mermaid
+flowchart LR
+    M["message arrives"] --> S{"HMAC matches<br/>app secret?"}
+    S -->|no| D1["403 · dropped before parsing"]
+    S -->|yes| A{"sender in<br/>allowlist?"}
+    A -->|no| D2["silence · never confirm<br/>the endpoint exists"]
+    A -->|yes| R{"message id<br/>seen before?"}
+    R -->|yes| D3["ignore · Meta retries<br/>would run it twice"]
+    R -->|no| ACK["200 immediately"]
+    ACK --> BG["dispatch in background"]
+    BG --> OUT["wave · answers · summary<br/><i>chunked to 3500 chars</i>"]
+```
+
+The `200` comes before the work, not after. Meta retries anything slow or non-2xx, and a
+dispatch takes minutes — replying only when the agents finish would guarantee duplicate
+deliveries, and with them duplicate runs.
+
+Three defaults are deliberately closed rather than open: no app secret means every
+delivery is refused instead of trusted, an empty allowlist disables the integration
+instead of accepting everyone, and an unknown sender gets silence instead of an error
+that would confirm something is listening.
 
 ---
 

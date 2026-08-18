@@ -172,6 +172,55 @@ are all blocked:
 public internet only — this would be reading your own machine.
 ```
 
+## Driving it from WhatsApp
+
+The agent pool runs on your machine; WhatsApp becomes a second front door to it. Send a
+task from your phone and each agent's answer arrives as it finishes.
+
+```
+you  ▸ draft a release note for v2 and list the migration risks
+     ◂ 🐙 Working on it — routing auto.
+     ◂ Wave 1 — 2 agent(s) in parallel
+       • ReleaseNote — local / qwen2.5:7b
+       • MigrationRisks — nvidia / nemotron-3-super-120b
+     ◂ ✅ ReleaseNote …
+     ◂ ✅ MigrationRisks …
+     ◂ 🐙 Done — 2 agents, 1 wave, 2 ok, 0 failed · ~3.1k tokens · free
+```
+
+Commands: `/status`, `/models`, `/cost`, `/mode auto|local|nvidia|gemini`, `/web <query>`,
+`/stop`, `/help`. Anything else is a task.
+
+### Setting it up
+
+Meta's official **WhatsApp Cloud API** — it has a free tier. The unofficial WhatsApp Web
+libraries get accounts banned and are deliberately not supported.
+
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+Then at [developers.facebook.com](https://developers.facebook.com): create an app, add the
+WhatsApp product, and set the webhook Callback URL to `<tunnel-url>/api/whatsapp` with your
+own `WHATSAPP_VERIFY_TOKEN`. Subscribe to the **messages** field. Fill in
+`WHATSAPP_TOKEN`, `WHATSAPP_PHONE_ID`, `WHATSAPP_APP_SECRET` and `WHATSAPP_ALLOWED` in
+`.env`, set `ENABLE_WHATSAPP=1`, restart, and check `/api/whatsapp/health`.
+
+### This is a public endpoint that runs work on your machine
+
+Three gates, all on by default, none optional:
+
+| Gate | What it stops |
+|---|---|
+| **Signature** — HMAC-SHA256 against your app secret | Anyone who finds the tunnel URL. No secret configured means every delivery is rejected, never trusted |
+| **Allowlist** — `WHATSAPP_ALLOWED` | Any number but yours. Strangers get silence, not an error, so the endpoint stays unadvertised |
+| **Replay** — message ids remembered | Meta retries deliveries it thinks failed; without this a retry dispatches the whole pool a second time |
+
+An empty allowlist disables the integration rather than opening it to everyone.
+
+The webhook always answers `200` immediately and runs the dispatch in the background — a
+run takes minutes, and Meta retries anything slow, which would mean duplicate runs.
+
 ## Cost, rate limits, and turning a provider off
 
 Everything reachable is free, so the budget is quota and wall-clock. Savings, largest
@@ -229,6 +278,8 @@ for streaming it is the gap between chunks), and `NIM_PROBE_TIMEOUT`.
 | GET | `/api/providers` | Every registered provider, its state, and the routing config |
 | POST | `/api/route` | Dry-run: where would this subtask go, and why? Dispatches nothing |
 | POST | `/api/web` | Search the web or read one page — no model involved |
+| GET/POST | `/api/whatsapp` | Meta webhook: handshake, then inbound messages |
+| GET | `/api/whatsapp/health` | Is WhatsApp wired up? Never returns the token or secret |
 | GET | `/api/models` | Every model ID one provider lists (`?provider=local`) |
 | GET | `/api/catalog` | Which of those actually answer, grouped, with per-provider bindings |
 | POST | `/api/dispatch` | Plan and run an agent pool over one task, streamed as SSE |

@@ -4,6 +4,8 @@ A local multi-agent console. Describe a task; it works out what kind of work it 
 splits it into as many agents as the task warrants, runs them in parallel, and decides
 for each one whether it should run **on your machine** or **on a hosted free tier**.
 
+Drive it from a browser, or from **WhatsApp on your phone**.
+
 **[Live demo →](https://bablu-singh.github.io/octopus-nim/)** — a recorded dispatch,
 replayed. GitHub Pages cannot run the Python backend, so the demo replays a real run
 captured from the live API. Everything else on that page is the app itself.
@@ -105,6 +107,31 @@ visible.
 **It will not read your machine.** Fetches are checked against the *resolved* address, so
 loopback, private ranges and the cloud metadata endpoint are refused even behind a public
 hostname.
+
+## Drive it from your phone
+
+WhatsApp is a second front door to the same agent pool. Send a task, get each agent's
+answer back as it finishes.
+
+```
+you  ▸ draft a release note for v2 and list the migration risks
+     ◂ Wave 1 — 2 agent(s) in parallel
+       • ReleaseNote — local / qwen2.5:7b
+       • MigrationRisks — nvidia / nemotron-3-super-120b
+     ◂ ✅ ReleaseNote …
+     ◂ 🐙 Done — 2 agents, 1 wave, 2 ok · ~3.1k tokens · free
+```
+
+`/status`, `/models`, `/cost`, `/mode`, `/web`, `/stop`, `/help` — anything else is a task.
+
+Meta's official Cloud API (free tier), reached through a `cloudflared` tunnel. It is a
+public endpoint that runs work on your machine, so three gates stand in front of it and
+none are optional: an HMAC signature check against your app secret, an allowlist of
+permitted numbers, and replay protection so Meta's retries cannot dispatch the pool twice.
+No app secret configured means every delivery is refused rather than trusted, and an empty
+allowlist disables the integration rather than opening it.
+
+Setup is in [nim-test-layer/README.md](nim-test-layer/README.md#driving-it-from-whatsapp).
 
 ## Cost, quota and switching a provider off
 

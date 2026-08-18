@@ -16,7 +16,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -27,7 +27,9 @@ import nim_client as nim
 import octopus
 import providers
 import routing
+import wa_bridge
 import web
+import whatsapp
 
 ENV_FILE = Path(__file__).parent / ".env"
 STATIC = Path(__file__).parent / "static"
@@ -202,6 +204,76 @@ async def api_web(req: WebRequest) -> dict:
         }
     except web.WebError as err:
         raise HTTPException(status_code=502, detail=str(err)) from err
+
+
+# --- WhatsApp ---------------------------------------------------------------
+# A public webhook that runs work on this machine. Everything about these two handlers
+# is shaped by that: verify the signature before parsing, check the allowlist before
+# acting, and never confirm to a stranger that the endpoint does anything.
+
+
+@app.get("/api/whatsapp", include_in_schema=False)
+def whatsapp_verify(request: Request) -> Response:
+    """Meta's one-time handshake when the webhook URL is saved."""
+    q = request.query_params
+    try:
+        challenge = whatsapp.verify_handshake(
+            q.get("hub.mode"), q.get("hub.verify_token"), q.get("hub.challenge"))
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="verify token mismatch")
+    return Response(content=challenge, media_type="text/plain")
+
+
+@app.post("/api/whatsapp", include_in_schema=False)
+async def whatsapp_inbound(request: Request) -> Response:
+    """Inbound messages. Always answers 200 — quickly.
+
+    Meta retries anything that is slow or non-2xx, and a dispatch takes minutes. So the
+    work is started in the background and the delivery acknowledged straight away;
+    replying only when the agents finish would guarantee duplicate deliveries and, with
+    them, duplicate runs.
+    """
+    raw = await request.body()
+
+    if not whatsapp.signed_by_meta(raw, request.headers.get("X-Hub-Signature-256")):
+        # 403 rather than 401: there is no authentication to retry with.
+        raise HTTPException(status_code=403, detail="bad signature")
+
+    ok, why = whatsapp.configured()
+    if not ok:
+        print(f"[whatsapp] ignoring delivery — {why}", flush=True)
+        return Response(status_code=200)
+
+    try:
+        payload = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return Response(status_code=200)
+
+    for msg in whatsapp.parse(payload):
+        if not whatsapp.permitted(msg.sender):
+            # Silence, not an error. An unknown number learns nothing about what is here.
+            print(f"[whatsapp] refused message from {msg.sender[:4]}…", flush=True)
+            continue
+        if whatsapp.already_handled(msg.message_id):
+            continue
+        asyncio.create_task(wa_bridge.handle(msg))
+
+    return Response(status_code=200)
+
+
+@app.get("/api/whatsapp/health")
+async def whatsapp_health() -> dict:
+    """Is the WhatsApp side wired up? Never returns the token or the secret."""
+    ok, why = whatsapp.configured()
+    return {
+        "enabled": whatsapp.ENABLED,
+        "ready": ok,
+        "detail": why,
+        "phone_id_set": bool(whatsapp.PHONE_ID),
+        "app_secret_set": bool(whatsapp.APP_SECRET),
+        "allowed_numbers": len(whatsapp.ALLOWED),
+        "active_runs": sum(1 for t in wa_bridge._runs.values() if not t.done()),
+    }
 
 
 @app.get("/api/catalog")
