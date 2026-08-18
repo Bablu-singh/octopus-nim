@@ -58,6 +58,8 @@ SESSION = os.getenv("WHATSAPP_QR_SESSION", str(HERE / "wa_session.sqlite3"))
 QR_PNG = HERE / "wa_qr.png"
 
 MAX_BODY = int(os.getenv("WHATSAPP_QR_MAX_BODY", "3500"))
+# Logs every inbound message and the reason it was or was not acted on.
+DEBUG = os.getenv("WHATSAPP_QR_DEBUG", "1") == "1"
 
 _client = None
 _thread: threading.Thread | None = None
@@ -104,6 +106,30 @@ def _digits(jid) -> str:
     """The plain number out of whatever shape the JID arrives in."""
     raw = getattr(jid, "User", None) or str(jid)
     return "".join(ch for ch in str(raw).split("@")[0].split(":")[0] if ch.isdigit())
+
+
+def _identities(source) -> tuple[set[str], str]:
+    """Every number this sender could be known by, and the phone one if we can tell.
+
+    WhatsApp now addresses people by LID as well as by phone number. In LID mode `Sender`
+    is a @lid identifier — a completely different number — and the phone number lives in
+    `SenderAlt`. Matching only `Sender` against an allowlist of phone numbers therefore
+    silently rejects the owner of the account, which is exactly the shape of "the bot
+    connects fine and ignores every message".
+    """
+    ids, phone = set(), ""
+    for attr in ("Sender", "SenderAlt"):
+        jid = getattr(source, attr, None)
+        if jid is None:
+            continue
+        num = _digits(jid)
+        if not num:
+            continue
+        ids.add(num)
+        # s.whatsapp.net is the phone-number namespace; lid is not.
+        if str(getattr(jid, "Server", "")).startswith("s.whatsapp"):
+            phone = phone or num
+    return ids, phone
 
 
 def _transport(chat_jid) -> chat_bridge.Transport:
@@ -200,34 +226,75 @@ def _run_client() -> None:
         print("[wa-qr] logged out", flush=True)
 
     @client.event(MessageEv)
+    @client.event(MessageEv)
     def _on_message(_c, message) -> None:
+        """Inbound. Every early return says why when DEBUG is on.
+
+        A door that silently ignores you is indistinguishable from a broken one, and the
+        allowlist path is deliberately silent, so the only way to tell them apart is to
+        say so in the log.
+        """
         try:
             info = message.Info
             msg_id = str(getattr(info, "ID", "") or "")
-            if msg_id in _sent_ids:
-                return                                 # our own reply coming back
+            src = info.MessageSource
+            ids, phone = _identities(src)
+            sender = phone or (sorted(ids)[0] if ids else "")
+            from_me = bool(getattr(info, "IsFromMe", False))
+            msg = message.Message
+            body = (getattr(msg, "conversation", "")
+                    or getattr(getattr(msg, "extendedTextMessage", None), "text", "")
+                    or "").strip()
 
-            sender = _digits(info.MessageSource.Sender)
-            # A message from the linked account is normally this bot talking. It is also
-            # how someone drives a bot that *is* their own WhatsApp: they message
-            # themselves. Both look identical here, so the id check above is what
-            # separates them — an echo of our own send is dropped, anything else the
-            # account typed is real input.
-            if getattr(info, "IsFromMe", False) and sender not in ALLOWED:
+            if DEBUG:
+                mode = getattr(src, "AddressingMode", "")
+                print(f"[wa-qr] inbound id={msg_id[:12]} ids={sorted(ids)} "
+                      f"phone={phone or '-'} mode={mode} from_me={from_me} "
+                      f"chars={len(body)} allowed={bool(ids & ALLOWED)}", flush=True)
+
+            if msg_id in _sent_ids:
+                if DEBUG:
+                    print("[wa-qr]   dropped: our own reply echoing back", flush=True)
                 return
-            if sender not in ALLOWED:
-                return                                 # silence, not an error
-            body = (message.Message.conversation
-                    or message.Message.extendedTextMessage.text or "").strip()
+            if not (ids & ALLOWED):
+                if DEBUG:
+                    print(f"[wa-qr]   dropped: none of {sorted(ids)} in "
+                          f"WHATSAPP_QR_ALLOWED ({sorted(ALLOWED)})", flush=True)
+                return
             if not body:
+                if DEBUG:
+                    kinds = [f.name for f, _ in msg.ListFields()]
+                    print(f"[wa-qr]   dropped: no text; message carries {kinds}", flush=True)
                 return
-            chat = info.MessageSource.Chat
-            # Hop from this thread onto the app's loop, where everything else lives.
-            if _loop is not None:
-                asyncio.run_coroutine_threadsafe(
-                    chat_bridge.handle(f"waqr:{sender}", body, _transport(chat)), _loop)
+
+            chat = src.Chat
+            if _loop is None:
+                print("[wa-qr]   dropped: no event loop bound", flush=True)
+                return
+            if DEBUG:
+                print(f"[wa-qr]   dispatching: {body[:60]!r}", flush=True)
+            asyncio.run_coroutine_threadsafe(
+                chat_bridge.handle(f"waqr:{sender}", body, _transport(chat)), _loop)
         except Exception as err:
+            import traceback
             print(f"[wa-qr] inbound error: {type(err).__name__}: {err}", flush=True)
+            traceback.print_exc()
+
+    if DEBUG:
+        # Trace every event the Go layer hands up, before any of our filtering. Without
+        # this there is no way to tell "the message never arrived" from "the message
+        # arrived and our handler rejected it" — and those need completely different
+        # fixes. Patched before connect(), because the ctypes callback is bound there.
+        from neonize.events import INT_TO_EVENT
+        _orig_execute = client.event.execute
+
+        def _traced(uuid, binary, size, code):
+            name = INT_TO_EVENT.get(code)
+            print(f"[wa-qr] raw event code={code} "
+                  f"{getattr(name, '__name__', name)}", flush=True)
+            return _orig_execute(uuid, binary, size, code)
+
+        client.event.execute = _traced
 
     try:
         client.connect()
@@ -248,6 +315,31 @@ def launch() -> bool:
     _thread = threading.Thread(target=_run_client, name="wa-qr", daemon=True)
     _thread.start()
     return True
+
+
+async def send_test(text: str = "octopus round-trip test") -> dict:
+    """Send one short message to the first allowed number.
+
+    A diagnostic, and a deliberately explicit one: proving the send path and the receive
+    path separately takes several rounds of a human typing on a phone, whereas one message
+    to yourself exercises both — it arrives, and its echo comes back in as an inbound
+    event. Only ever addressed to a number already on the allowlist.
+    """
+    if _client is None or not _state["connected"]:
+        return {"sent": False, "detail": "client is not connected"}
+    if not ALLOWED:
+        return {"sent": False, "detail": "no allowed number to send to"}
+    number = sorted(ALLOWED)[0]
+    try:
+        from neonize.utils import build_jid
+        loop = asyncio.get_running_loop()
+        resp = await loop.run_in_executor(
+            None, _client.send_message, build_jid(number), text)
+        msg_id = str(getattr(resp, "ID", "") or "")
+        _remember_sent(msg_id)
+        return {"sent": True, "to": number, "message_id": msg_id}
+    except Exception as err:
+        return {"sent": False, "detail": f"{type(err).__name__}: {err}"}
 
 
 def status() -> dict:

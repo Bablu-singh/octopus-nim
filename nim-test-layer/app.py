@@ -316,6 +316,12 @@ def wa_qr_image() -> FileResponse:
     return FileResponse(wa_qr.QR_PNG, media_type="image/png")
 
 
+@app.post("/api/whatsapp-qr/test", include_in_schema=False)
+async def wa_qr_test() -> dict:
+    """Send one diagnostic message to the allowed number. Proves both directions."""
+    return await wa_qr.send_test()
+
+
 @app.get("/api/discord/health")
 async def discord_health() -> dict:
     """Is the bot connected? Never returns the token."""
