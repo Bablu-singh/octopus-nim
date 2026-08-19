@@ -189,9 +189,16 @@ you ▸ now make the poem one line shorter
 bot ◂ ➕ Queued — 3 ahead of it
 ```
 
-Sequential rather than concurrent on purpose: two pools at once would interleave their
-answers in one chat with no way to tell them apart, and would double the load on the rate
-limits that are already the tightest constraint here.
+Each task gets its own **tangle** — its own pool of agents — and up to
+`CHAT_MAX_CONCURRENT` (default 3) run at once. Anything beyond that waits for a slot.
+
+Not unbounded: every agent inside every tangle competes for the same provider rate limits,
+so past a few concurrent runs the extra parallelism buys 429s rather than speed.
+
+Concurrency needs one thing the sequential version did not. Agent ids (`writer-1`) are only
+unique *within* a run, so three tangles will all produce a `writer-1`; everything the UI
+keys on is prefixed with a run id, or the second tangle would overwrite the first one's
+cards.
 
 **Turns are remembered.** Each finished task leaves a short digest behind, and later tasks
 are dispatched with those digests prepended — so *"now make the poem one line shorter"*
@@ -202,9 +209,9 @@ planner handed a paragraph of previous results will otherwise plan agents to red
 And the router weighs the *original* task, not the context-prefixed one: a long history
 would otherwise count someone else's earlier request as evidence that this one is heavy.
 
-The browser has the same thing: **Dispatch never blocks** — a second task queues under the
-box with the running one, removable with ✕ — and **New session** forgets the thread and
-drops the queue. The session id lives in `localStorage`, and the memory is the *same store*
+The browser has the same thing: **Dispatch never blocks** — each task opens its own tangle,
+three run side by side, and anything past that queues under the box (removable with ✕) —
+and **New session** forgets the thread and drops the queue. The session id lives in `localStorage`, and the memory is the *same store*
 the chat doors use, reached by passing `session` to `/api/dispatch`.
 
 | Command | |

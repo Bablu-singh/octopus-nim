@@ -113,6 +113,18 @@
   .queue .q .drop{margin-left:auto;cursor:pointer;color:var(--muted);opacity:.7}
   .queue .q .drop:hover{color:#ff9b8f;opacity:1}
   .memo{font-family:var(--mono);font-size:11px;color:var(--muted);opacity:.75;margin-top:6px}
+  /* One tangle per task. Concurrent runs each get their own group, so two pools on screen
+     at once stay legible instead of interleaving their cards. */
+  .tangle{border:1px solid var(--ridge);border-radius:14px;padding:14px;margin-bottom:16px;
+    background:#07202a66;animation:rise .4s ease both}
+  .tangle.live{border-color:var(--edge);box-shadow:0 0 0 1px #7ff2e01a}
+  .tangle > h2{font-family:var(--display);font-size:14px;margin:0 0 10px;display:flex;
+    gap:10px;align-items:baseline;flex-wrap:wrap;color:var(--text)}
+  .tangle > h2 .tno{font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--glow);border:1px solid currentColor;
+    border-radius:20px;padding:1px 8px}
+  .tangle > h2 .tstate{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
+  .tangle .inner{display:grid;gap:12px}
   .why .tag{color:var(--glow)}
 
   /* ---- results ---- */
@@ -250,6 +262,7 @@
       <button class="go" id="go">Dispatch</button>
     </div>
     <div class="why" id="why"></div>
+    <div class="memo" id="hintlive"></div>
     <div class="queue" id="queue"></div>
   </div>
 
@@ -430,17 +443,19 @@ const bare = m => (m || "").replace(/^[a-z0-9_-]+:(?=.)/, "");
 function card(a) {
   const el = document.createElement("div");
   el.className = "card";
-  el.id = "card-" + a.id;
+  el.id = "card-" + a.key;
   el.style.setProperty("--c", a.color);
   el.innerHTML = `<h3>
       <span class="who">${esc(a.label)}</span>
       <span class="role">${esc(a.role)}</span>
       ${a.provider ? `<span class="prov" data-p="${esc(a.provider)}">${esc(a.provider)}</span>` : ""}
       <span class="mdl">${esc(bare(a.model) || "—")}</span>
-      <span class="ms" id="ms-${a.id}"></span>
+      <span class="ms" id="ms-${a.key}"></span>
       ${a.route_why ? `<span class="rwhy">routed: ${esc(a.route_why)}</span>` : ""}
-    </h3><div class="out" id="out-${a.id}"></div>`;
-  $("results").appendChild(el);
+    </h3><div class="out" id="out-${a.key}"></div>`;
+  // Into its own tangle, not the shared results list: with two runs going at once a
+  // single flat list gives no way to tell which answer belongs to which task.
+  (document.getElementById("inner-" + a.rid) || $("results")).appendChild(el);
   return el;
 }
 
@@ -502,7 +517,7 @@ if (!SESSION) {
    rule the chat doors follow, and for the same reason: two runs at once would interleave
    their cards with no way to tell them apart. */
 const QUEUE = [];
-let RUNNING = false;
+let LIVE = 0;                        // tangles currently running
 
 function paintQueue() {
   const box = $("queue");
@@ -512,8 +527,8 @@ function paintQueue() {
   box.querySelectorAll(".drop").forEach(el => {
     el.onclick = () => { QUEUE.splice(+el.dataset.i, 1); paintQueue(); };
   });
-  $("go").textContent = RUNNING && QUEUE.length ? `Queue (${QUEUE.length})`
-                      : RUNNING ? "Queue" : "Dispatch";
+  $("go").textContent = QUEUE.length ? `Dispatch (+${QUEUE.length} waiting)` : "Dispatch";
+  $("hintlive").textContent = LIVE ? `${LIVE} tangle${LIVE === 1 ? "" : "s"} running` : "";
 }
 
 async function refreshMemo() {
@@ -534,25 +549,48 @@ $("newsess").onclick = async () => {
   paintQueue();
   $("results").innerHTML = "";
   $("limbs").innerHTML = "";
-  A.clear(); waves = 0;
+  A.clear(); waves = 0; RID = 0; started = 0;
+  clearInterval(timer);
   layout();
   $("why").innerHTML = `<span class="tag">new session</span> previous conversation forgotten`;
   refreshMemo();
 };
 
-/* ---------- dispatch ---------- */
+/* ---------- dispatch ----------
+   Several tasks can be in flight at once, each with its own tangle. Every agent id the
+   server emits ('writer-1') is only unique within its own run, so everything the DOM and
+   the limb map key on is prefixed with a run id — without that, a second concurrent run
+   would overwrite the first one's cards. */
+let RID = 0;
+// Matches CHAT_MAX_CONCURRENT server-side. Not unbounded: every agent in every
+// tangle competes for the same provider rate limits.
+const MAX_CONCURRENT = 3;
+
+function openTangle(task) {
+  const rid = "r" + (++RID);
+  const sec = document.createElement("section");
+  sec.className = "tangle live";
+  sec.id = "tangle-" + rid;
+  sec.innerHTML = `<h2><span class="tno">tangle ${RID}</span>` +
+    `<span>${esc(task.slice(0, 120))}</span>` +
+    `<span class="tstate" id="tstate-${rid}">starting…</span></h2>` +
+    `<div class="inner" id="inner-${rid}"></div>`;
+  $("results").prepend(sec);
+  return rid;
+}
+
+function tstate(rid, text) {
+  const el = document.getElementById("tstate-" + rid);
+  if (el) el.textContent = text;
+}
+
 async function runOne(task) {
-  $("results").innerHTML = "";
-  $("limbs").innerHTML = "";
-  A.clear(); waves = 0;
-  $("why").textContent = "reading the task…";
-  started = Date.now();
+  const rid = openTangle(task);
+  started = started || Date.now();
   clearInterval(timer);
   timer = setInterval(() => {
     $("m-time").textContent = Math.round((Date.now() - started) / 1000) + "s";
   }, 250);
-  layout();
-
   try {
     const r = await fetch(API + "/api/dispatch", {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -560,31 +598,36 @@ async function runOne(task) {
       body: JSON.stringify({task, session: SESSION})
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
-    await consume(r);
+    await consume(r, rid);
   } catch (err) {
-    $("why").innerHTML = `<span class="fail">${esc(err.message)}</span>`;
+    tstate(rid, "failed");
+    const box = document.getElementById("inner-" + rid);
+    if (box) box.innerHTML = `<span class="fail">${esc(err.message)}</span>`;
   }
-  clearInterval(timer);
+  document.getElementById("tangle-" + rid)?.classList.remove("live");
   metrics();
   refreshMemo();
 }
 
-async function pump() {
-  if (RUNNING) return;
-  RUNNING = true;
-  $("go").disabled = false;          // stays live: submitting during a run is the point
-  while (QUEUE.length) {
+/* Starts as many tangles as the queue holds, up to MAX_CONCURRENT. Not unbounded: every
+   agent inside every tangle still competes for the same provider rate limits, and past a
+   point more concurrency just means more 429s and slower answers for all of them. */
+function pump() {
+  while (LIVE < MAX_CONCURRENT && QUEUE.length) {
     const task = QUEUE.shift();
+    LIVE++;
     paintQueue();
-    await runOne(task);
+    runOne(task).finally(() => {
+      LIVE--;
+      paintQueue();
+      pump();                       // a finished tangle makes room for a queued one
+    });
   }
-  RUNNING = false;
   paintQueue();
 }
 
-/* Reads one dispatch stream to the end. Unchanged from the original handler —
-   lifting it out is what lets the queue feed it task after task. */
-async function consume(r) {
+async function consume(r, rid) {
+  const K = id => rid + '-' + id;   // namespace ids so tangles cannot collide
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = "";
     while (true) {
@@ -610,29 +653,30 @@ async function consume(r) {
         else if (e.event === "wave") {
           waves = e.n;
           waveBar(e.n, e.why, e.agents.length);
+          tstate(rid, `wave ${e.n} · ${e.agents.length} agent(s)`);
           for (const g of e.agents) {
-            A.set(g.id, {...g, status: "queued", text: ""});
-            card(A.get(g.id));
+            A.set(K(g.id), {...g, key: K(g.id), rid, status: "queued", text: ""});
+            card(A.get(K(g.id)));
           }
           layout();
         }
         else if (e.event === "start") {
-          const a = A.get(e.id); if (!a) continue;
+          const a = A.get(K(e.id)); if (!a) continue;
           a.status = "busy";
-          $("card-" + e.id)?.classList.add("busy");
+          $("card-" + K(e.id))?.classList.add("busy");
           layout();
         }
         else if (e.event === "searching") {
-          const card = $("card-" + e.id);
+          const card = $("card-" + K(e.id));
           if (card && !card.querySelector(".srcs")) {
             const d = document.createElement("div");
-            d.className = "srcs"; d.id = "srcs-" + e.id;
+            d.className = "srcs"; d.id = "srcs-" + K(e.id);
             d.innerHTML = `<b>web</b> · ${esc(e.detail || "searching…")}`;
             card.querySelector("h3").after(d);
           }
         }
         else if (e.event === "sources") {
-          const box = $("srcs-" + e.id);
+          const box = $("srcs-" + K(e.id));
           if (box) {
             const list = (e.sources || []).map(s2 =>
               `<a href="${esc(s2.url)}" target="_blank" rel="noopener noreferrer">${esc(s2.title || s2.url)}</a>`).join("");
@@ -644,29 +688,29 @@ async function consume(r) {
           }
         }
         else if (e.event === "chunk") {
-          const a = A.get(e.id); if (!a) continue;
+          const a = A.get(K(e.id)); if (!a) continue;
           a.text += e.text;
-          markDirty(e.id);
+          markDirty(K(e.id));
         }
         else if (e.event === "image") {
-          $("out-" + e.id).innerHTML = `<img src="${e.image}" alt="generated image">`;
-          $("ms-" + e.id).textContent = e.latency_ms + " ms";
+          $("out-" + K(e.id)).innerHTML = `<img src="${e.image}" alt="generated image">`;
+          $("ms-" + K(e.id)).textContent = e.latency_ms + " ms";
         }
         else if (e.event === "done") {
-          const a = A.get(e.id); if (!a) continue;
+          const a = A.get(K(e.id)); if (!a) continue;
           a.status = "done"; a.ms = e.latency_ms;
-          $("card-" + e.id)?.classList.remove("busy");
-          $("ms-" + e.id).textContent = e.latency_ms + " ms";
-          dirty.delete(e.id);
-          paint(e.id);          // final paint, including the scheduler's plan table
+          $("card-" + K(e.id))?.classList.remove("busy");
+          $("ms-" + K(e.id)).textContent = e.latency_ms + " ms";
+          dirty.delete(K(e.id));
+          paint(K(e.id));          // final paint, including the scheduler's plan table
           layout();
         }
         else if (e.event === "error") {
-          const a = A.get(e.id); if (!a) continue;
+          const a = A.get(K(e.id)); if (!a) continue;
           a.status = "failed";
-          dirty.delete(e.id);
-          $("card-" + e.id)?.classList.remove("busy");
-          $("out-" + e.id).innerHTML = `<span class="fail">${esc(e.detail)}</span>`;
+          dirty.delete(K(e.id));
+          $("card-" + K(e.id))?.classList.remove("busy");
+          $("out-" + K(e.id)).innerHTML = `<span class="fail">${esc(e.detail)}</span>`;
           layout();
         }
         else if (e.event === "rebind") {
@@ -678,6 +722,7 @@ async function consume(r) {
         }
         else if (e.event === "complete") {
           const secs = Math.round((Date.now() - started) / 1000);
+          tstate(rid, `${e.ok} ok${e.failed ? `, ${e.failed} failed` : ""} · ${e.agents} agent(s)`);
           $("m-time").textContent = secs + "s";
           const split = Object.entries(e.by_provider || {})
             .map(([n, c]) => `${c} ${n}`).join(" + ");

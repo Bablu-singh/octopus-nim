@@ -130,7 +130,11 @@ def _transport(channel) -> chat_bridge.Transport:
     # an underscore. Getting this wrong shows up as literal asterisks in the chat.
     return chat_bridge.Transport(name="discord", limit=LIMIT, send=send,
                                  bold="**", italic="*",
-                                 card=card, status=status, card_limit=EMBED_LIMIT)
+                                 card=card, status=status, card_limit=EMBED_LIMIT,
+                                 # A fresh transport per concurrent run: `state` above
+                                 # holds the one message this run edits, and two runs
+                                 # sharing it would overwrite each other's progress.
+                                 fork=lambda: _transport(channel))
 
 
 async def _build():

@@ -56,6 +56,14 @@ class Transport:
     status: Callable[[str], Awaitable[bool]] | None = None
     # Embeds hold far more than a plain message, so the split budget differs by surface.
     card_limit: int = 0
+    # Returns a fresh Transport for a concurrent run. Discord's status line is one message
+    # that gets edited, so two runs sharing a transport would overwrite each other's
+    # progress; each run takes its own. Platforms without an editable status can hand back
+    # the same object, since there is nothing to collide over.
+    fork: Callable[[], "Transport"] | None = None
+
+    def branch(self) -> "Transport":
+        return self.fork() if self.fork else self
 
     def b(self, text: str) -> str:
         return f"{self.bold}{text}{self.bold}"
@@ -149,6 +157,11 @@ def split(text: str, limit: int) -> list[str]:
 # when a train of thought is over, not the app.
 
 MAX_QUEUE = int(os.getenv("CHAT_MAX_QUEUE", "12"))
+# Tasks that may run at once in one conversation. More than one because waiting for a
+# long run before starting an unrelated task is the complaint this exists to answer; not
+# unbounded because every agent in every run competes for the same provider rate limits,
+# and past a point more concurrency just buys more 429s.
+MAX_CONCURRENT = int(os.getenv("CHAT_MAX_CONCURRENT", "3"))
 # How many past turns a new task is told about. Enough to follow a thread, few enough
 # that the planner is not reading an essay before it starts.
 HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
@@ -173,15 +186,20 @@ class Session:
     queue: deque = field(default_factory=deque)
     turns: list[Turn] = field(default_factory=list)
     worker: asyncio.Task | None = None
-    running: asyncio.Task | None = None      # the dispatch currently in flight
-    current: str = ""                        # its task text, for /queue
+    # Tasks in flight right now, mapped to their text. Several, not one: a conversation
+    # can have more than one tangle going.
+    live: dict = field(default_factory=dict)
     mode: str = "auto"
     last_cost: dict = field(default_factory=dict)
     started: float = field(default_factory=time.time)
 
     @property
     def busy(self) -> bool:
-        return self.worker is not None and not self.worker.done()
+        return bool(self.live) or (self.worker is not None and not self.worker.done())
+
+    @property
+    def current(self) -> str:
+        return "; ".join(list(self.live.values())[:2])
 
 
 _sessions: dict[str, Session] = {}
@@ -328,12 +346,12 @@ def _queue_view(sess: Session, t: Transport) -> str:
     mins = (time.time() - sess.started) / 60
     lines.append(f"open {mins:.0f} min · {len(sess.turns)} task(s) remembered")
     lines.append("")
-    if sess.current:
-        lines.append(f"▶ {t.b('running')}: {sess.current[:90]}")
+    for task in list(sess.live.values()):
+        lines.append(f"▶ {t.b('running')}: {task[:80]}")
     if sess.queue:
         for i, q in enumerate(sess.queue, 1):
             lines.append(f"{i}. {q[:90]}")
-    elif not sess.current:
+    elif not sess.live:
         lines.append("Nothing running, nothing queued.")
     return "\n".join(lines)
 
@@ -468,34 +486,31 @@ async def _run_task(sess: Session, task: str, t: Transport) -> None:
 
 
 async def _drain(sess: Session, t: Transport) -> None:
-    """Work through the queue, one task at a time, until it is empty.
+    """Keep up to MAX_CONCURRENT tasks in flight until the queue is empty.
 
-    Sequential on purpose. Two dispatches at once would interleave their answers in a
-    single chat with no way to tell which belonged to which, and would double the load on
-    rate limits that are already the tightest constraint here.
+    Each task gets its own tangle and its own transport branch, so their progress lines
+    and answers stay separable in one chat rather than overwriting each other.
     """
     try:
-        while sess.queue:
-            task = sess.queue.popleft()
-            sess.current = task
-            sess.running = asyncio.create_task(_run_task(sess, task, t))
-            try:
-                await sess.running
-            except asyncio.CancelledError:
-                # /stop cancels the running task, not the session. Anything still queued
-                # is work the user asked for and has not withdrawn.
-                pass
-            finally:
-                sess.running = None
-                sess.current = ""
+        while sess.queue or sess.live:
+            while sess.queue and len(sess.live) < MAX_CONCURRENT:
+                task = sess.queue.popleft()
+                run = asyncio.create_task(_run_task(sess, task, t.branch()))
+                sess.live[run] = task
+                run.add_done_callback(lambda r: sess.live.pop(r, None))
+            if not sess.live:
+                break
+            # Wake as soon as any one finishes, so a freed slot is refilled immediately
+            # rather than after the slowest of the batch.
+            await asyncio.wait(set(sess.live), return_when=asyncio.FIRST_COMPLETED)
     finally:
         sess.worker = None
 
 
 # Discord's client swallows anything beginning with '/' and tries to match it against
-# registered application commands — so a '/help' typed there never arrives as a message,
-# and the user sees "the application did not respond". '!' is accepted for exactly that
-# reason, and both are treated identically everywhere else.
+# registered application commands, so a '/help' typed there never arrives as a message
+# and the user sees "the application did not respond". '!' is accepted for that reason,
+# and both are treated identically everywhere else.
 PREFIXES = ("/", "!")
 
 
@@ -545,10 +560,16 @@ async def handle(convo: str, text: str, t: Transport) -> None:
             sess.started = time.time()
             await t.send(f"🐙 {t.b('New session')} — forgot {remembered} task(s)"
                          + (f", dropped {dropped} queued" if dropped else "")
-                         + (". The run in progress will finish." if sess.running else "."))
+                         + (f". {len(sess.live)} run(s) in progress will finish."
+                            if sess.live else "."))
         elif cmd == "stop":
-            if sess.running and not sess.running.done():
-                sess.running.cancel()
+            if sess.live:
+                # Cancels every tangle in flight. /stop has always meant "stop what is
+                # happening"; with several running that is all of them.
+                n = len(sess.live)
+                for run in list(sess.live):
+                    run.cancel()
+                await t.send(f"Stopping {n} run(s).")
             elif sess.queue:
                 n = len(sess.queue)
                 sess.queue.clear()
@@ -568,10 +589,15 @@ async def handle(convo: str, text: str, t: Transport) -> None:
 
     sess.queue.append(text)
 
+    # Counted after the append, and including anything the drainer has not picked up yet:
+    # reading `live` alone reports 0 for tasks submitted faster than the loop starts them.
+    pending = len(sess.queue) + len(sess.live)
     if sess.busy:
-        ahead = len(sess.queue)
-        await t.send(f"➕ {t.b('Queued')} — {ahead} ahead of it. "
-                     f"Running: {t.i(sess.current[:60] or 'something')}")
+        if pending > MAX_CONCURRENT:
+            await t.send(f"➕ {t.b('Queued')} — {MAX_CONCURRENT} tangles run at once, "
+                         f"{pending} in this session.")
+        else:
+            await t.send(f"🐙 {t.b('Starting')} — {pending} tangles now running in parallel.")
         return
 
     pin = sess.mode
