@@ -291,7 +291,7 @@ async def whatsapp_health() -> dict:
         "phone_id_set": bool(whatsapp.PHONE_ID),
         "app_secret_set": bool(whatsapp.APP_SECRET),
         "allowed_numbers": len(whatsapp.ALLOWED),
-        "active_runs": sum(1 for t in wa_bridge._runs.values() if not t.done()),
+        "active_runs": wa_bridge.active_runs(),
     }
 
 

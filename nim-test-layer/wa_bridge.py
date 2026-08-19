@@ -10,9 +10,9 @@ from __future__ import annotations
 import chat_bridge
 import whatsapp
 
-# Kept as a module-level alias so /api/whatsapp/health can report in-flight runs without
-# reaching across into chat_bridge itself.
-_runs = chat_bridge._runs
+def active_runs() -> int:
+    """In-flight dispatches, for /api/whatsapp/health."""
+    return chat_bridge.active_runs()
 
 
 def transport(sender: str) -> chat_bridge.Transport:

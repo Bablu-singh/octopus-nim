@@ -172,6 +172,46 @@ are all blocked:
 public internet only — this would be reading your own machine.
 ```
 
+## Sessions: a queue and a memory
+
+A conversation is not a series of unrelated requests, so it is not treated as one.
+
+**Tasks queue.** A dispatch takes minutes, and refusing new work for all of it turns the
+chat into a stop-and-wait terminal. Send as many as you like — they are accepted
+immediately and run one after another:
+
+```
+you ▸ write a two-line poem about the sea
+bot ◂ 🐙 Working on it…
+you ▸ name three colours
+bot ◂ ➕ Queued — 2 ahead of it
+you ▸ now make the poem one line shorter
+bot ◂ ➕ Queued — 3 ahead of it
+```
+
+Sequential rather than concurrent on purpose: two pools at once would interleave their
+answers in one chat with no way to tell them apart, and would double the load on the rate
+limits that are already the tightest constraint here.
+
+**Turns are remembered.** Each finished task leaves a short digest behind, and later tasks
+are dispatched with those digests prepended — so *"now make the poem one line shorter"*
+resolves against the poem from two tasks ago rather than inventing a new one.
+
+The context block is explicitly labelled as background that must not be redone, because a
+planner handed a paragraph of previous results will otherwise plan agents to redo them.
+And the router weighs the *original* task, not the context-prefixed one: a long history
+would otherwise count someone else's earlier request as evidence that this one is heavy.
+
+| Command | |
+|---|---|
+| `/queue` | what is running, what is waiting |
+| `/history` | what this session remembers |
+| `/stop` | cancel the running task (the queue survives) |
+| `/new` | end the session: forget the thread, drop the queue |
+
+Both the queue and the memory live until `/new` — the user decides when a train of thought
+is over, not the app.
+
 ## Driving it from Discord
 
 The easy front door, and the one to reach for. Discord's gateway is an **outbound**

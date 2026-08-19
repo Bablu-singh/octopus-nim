@@ -247,7 +247,20 @@ visible in the transcript when something does go wrong.
 
 ## The chat front doors
 
-`chat_bridge.py` is the only module that knows both chat and agents. A transport is three
+`chat_bridge.py` is the only module that knows both chat and agents, and it owns the
+session: a per-conversation queue, the turns already finished, and the routing pin.
+
+A dispatch is stateless by design — `octopus.dispatch()` takes a task and knows nothing
+about what came before. Conversation memory therefore lives here rather than in the
+orchestrator: each finished task leaves a digest, and the next task is dispatched with
+those digests prepended and clearly marked as background. The one thing this cannot do
+alone is weighing, since the prefixed task looks longer and therefore heavier than it is —
+hence `dispatch(..., weigh_as=)`, which lets the caller plan from one string and route
+from another.
+
+Tasks run one at a time per conversation. Concurrency here would interleave two sets of
+answers in a single chat and double the pressure on rate limits, which are the tightest
+constraint in the system. A transport is three
 things — a message limit, how bold and italic are spelled, and how to send — plus nothing
 else, so adding a platform is a small job and two platforms cannot drift apart.
 

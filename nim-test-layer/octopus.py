@@ -484,7 +484,7 @@ The question:
 
 
 async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
-                   mode: str | None = None) -> AsyncIterator[str]:
+                   mode: str | None = None, weigh_as: str | None = None) -> AsyncIterator[str]:
     """Grow a pool of agents around one task and stream all of them at once.
 
     The task decides how many agents run — a one-line request gets one, a broad one gets a
@@ -538,7 +538,12 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
 
     # Scored once, against the whole task rather than a subtask, and used only to decide
     # whether growing the pool past wave 1 can possibly be justified. See the wave loop.
-    task_weight, _ = routing.weigh(task, "analyst")
+    #
+    # `weigh_as` exists for callers that prepend conversation history to the task: the
+    # planner should see that context, but weighing it would count someone else's earlier
+    # request as evidence that *this* one is heavy, and a long enough history would push
+    # every follow-up to a hosted model and skip the planner-skip saving entirely.
+    task_weight, _ = routing.weigh(weigh_as or task, "analyst")
 
     queue: asyncio.Queue = asyncio.Queue()
     sems = {"local": asyncio.Semaphore(LOCAL_PARALLEL)}

@@ -132,7 +132,12 @@ bot  ◂ Wave 1 — 2 agent(s) in parallel
      ◂ 🐙 Done — 2 agents, 1 wave, 2 ok · ~3.1k tokens · free
 ```
 
-`/status` `/models` `/cost` `/mode` `/web` `/stop` `/help` — anything else is a task.
+`/status` `/models` `/cost` `/mode` `/web` `/queue` `/history` `/stop` `/new` — anything
+else is a task.
+
+Tasks **queue** rather than being refused while one runs, and each one **remembers the
+turns before it**, so "now make that shorter" resolves against what was actually produced.
+Both last until `/new`.
 
 Both doors are peers of the browser UI: all three call `octopus.dispatch()` directly, and
 one shared bridge turns dispatch events into messages, so a platform differs only in its

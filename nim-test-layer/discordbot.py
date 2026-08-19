@@ -299,5 +299,5 @@ def status() -> dict:
         "user": str(getattr(_client, "user", "")) if connected else None,
         "allowed_users": len(ALLOWED),
         "restricted_channels": len(CHANNELS),
-        "active_runs": sum(1 for t in chat_bridge._runs.values() if not t.done()),
+        "active_runs": chat_bridge.active_runs(),
     }

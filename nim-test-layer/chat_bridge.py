@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
-from dataclasses import dataclass
+import time
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 import octopus
@@ -128,15 +131,90 @@ def split(text: str, limit: int) -> list[str]:
     return fixed
 
 
-# One run per conversation. A second task while one is going would interleave two sets of
-# results with no way to tell them apart.
-_runs: dict[str, asyncio.Task] = {}
-# Per-conversation routing pin, set with /mode. Not global: the browser, a phone and a
-# Discord channel should be able to disagree about where work goes.
-_mode: dict[str, str] = {}
-_last_cost: dict[str, dict] = {}
+# --- sessions ----------------------------------------------------------------
+# A conversation is not a series of unrelated requests. Two things follow from that, and
+# both used to be missing:
+#
+#   Queueing. A dispatch takes minutes, and refusing new work for that whole time turns
+#   the chat into a stop-and-wait terminal. Tasks are now accepted whenever they arrive
+#   and run one after another — sequentially rather than concurrently, because two pools
+#   at once would interleave their answers in one chat and fight over the same rate
+#   limits.
+#
+#   Memory. "now make it shorter" means nothing without the previous turn. Each finished
+#   task leaves a short digest behind, and later tasks are dispatched with those digests
+#   prepended, so a follow-up can refer to what came before.
+#
+# Both live until the session is cleared with /new — deliberately, since the user decides
+# when a train of thought is over, not the app.
 
-BUSY = "⏳ A run is already going. Send /stop to cancel it, or wait for it to finish."
+MAX_QUEUE = int(os.getenv("CHAT_MAX_QUEUE", "12"))
+# How many past turns a new task is told about. Enough to follow a thread, few enough
+# that the planner is not reading an essay before it starts.
+HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
+# Per-turn budget in the context block. A whole answer would swamp the new request.
+DIGEST_CHARS = int(os.getenv("CHAT_DIGEST_CHARS", "500"))
+
+
+@dataclass
+class Turn:
+    """One finished task and a compressed trace of what it produced."""
+
+    task: str
+    digest: str
+    at: float = field(default_factory=time.time)
+
+
+@dataclass
+class Session:
+    """Everything remembered about one conversation."""
+
+    convo: str
+    queue: deque = field(default_factory=deque)
+    turns: list[Turn] = field(default_factory=list)
+    worker: asyncio.Task | None = None
+    running: asyncio.Task | None = None      # the dispatch currently in flight
+    current: str = ""                        # its task text, for /queue
+    mode: str = "auto"
+    last_cost: dict = field(default_factory=dict)
+    started: float = field(default_factory=time.time)
+
+    @property
+    def busy(self) -> bool:
+        return self.worker is not None and not self.worker.done()
+
+
+_sessions: dict[str, Session] = {}
+
+
+def session(convo: str) -> Session:
+    if convo not in _sessions:
+        _sessions[convo] = Session(convo=convo)
+    return _sessions[convo]
+
+
+def active_runs() -> int:
+    """How many conversations are mid-dispatch. For the health endpoints."""
+    return sum(1 for s in _sessions.values() if s.busy)
+
+
+def _context(sess: Session, task: str) -> str:
+    """The task as the planner should see it: what came before, then what to do now.
+
+    Marked as context and explicitly not as work, because a planner handed a paragraph of
+    previous results will otherwise cheerfully plan agents to redo them.
+    """
+    if not sess.turns:
+        return task
+    lines = ["Context from earlier in this conversation. It is background only — it has "
+             "already been produced and must NOT be redone:"]
+    for i, turn in enumerate(sess.turns[-HISTORY_TURNS:], 1):
+        lines.append(f"{i}. Asked: {turn.task[:200]}")
+        lines.append(f"   Produced: {turn.digest[:DIGEST_CHARS]}")
+    lines.append("")
+    lines.append("THE ACTUAL TASK, which may refer back to the above:")
+    lines.append(task)
+    return "\n".join(lines)
 
 
 def help_text(t: Transport) -> str:
@@ -145,6 +223,9 @@ def help_text(t: Transport) -> str:
 Send any task and the agent pool runs it on the host machine:
 {t.i('draft a release note for v2 and list the migration risks')}
 
+Send as many as you like — they queue up and run one after another, and each
+one remembers what came before, so {t.i('now make that shorter')} works.
+
 {t.b('Commands')} (either / or ! works)
 /help — this message
 /status — providers, routing mode, web access
@@ -152,7 +233,10 @@ Send any task and the agent pool runs it on the host machine:
 /cost — what the last run spent
 /mode auto|local|nvidia|gemini — pin where work goes
 /web <query> — search the web, no model involved
+/queue — what is running and what is waiting
+/history — what this session remembers
 /stop — cancel the run in progress
+/new — end the session: forget the thread, drop the queue
 
 Anything not starting with / is treated as a task."""
 
@@ -186,8 +270,8 @@ async def _models(t: Transport) -> str:
     return "\n".join(lines).strip()
 
 
-def _cost(convo: str, t: Transport) -> str:
-    c = _last_cost.get(convo)
+def _cost(sess: Session, t: Transport) -> str:
+    c = sess.last_cost
     if not c:
         return "No run recorded here yet. Send a task first."
     lines = [f"🐙 {t.b('Last run')}", ""]
@@ -199,36 +283,44 @@ def _cost(convo: str, t: Transport) -> str:
     return "\n".join(lines) + tail
 
 
-async def _web(query: str, t: Transport) -> str:
-    if not query:
-        return "Give me something to search: /web ollama structured outputs"
-    if not web.ENABLED:
-        return "Web access is off (ENABLE_WEB=0)."
-    try:
-        bundle = await web.research(query, 5, 0)
-    except web.WebError as err:
-        return f"Search failed: {err}"
-    if not bundle["results"]:
-        return f"Nothing came back for {t.i(query)}."
-    lines = [f"🔎 {t.b(bundle['query'])}", ""]
-    for r in bundle["results"][:5]:
-        lines.append(f"• {t.b(r['title'][:70])}\n{r['url']}")
+def _queue_view(sess: Session, t: Transport) -> str:
+    lines = [f"🐙 {t.b('Session')}"]
+    mins = (time.time() - sess.started) / 60
+    lines.append(f"open {mins:.0f} min · {len(sess.turns)} task(s) remembered")
+    lines.append("")
+    if sess.current:
+        lines.append(f"▶ {t.b('running')}: {sess.current[:90]}")
+    if sess.queue:
+        for i, q in enumerate(sess.queue, 1):
+            lines.append(f"{i}. {q[:90]}")
+    elif not sess.current:
+        lines.append("Nothing running, nothing queued.")
     return "\n".join(lines)
 
 
-def _set_mode(convo: str, arg: str, t: Transport) -> str:
+def _history_view(sess: Session, t: Transport) -> str:
+    if not sess.turns:
+        return "Nothing remembered yet in this session."
+    lines = [f"🐙 {t.b('What I remember')} ({len(sess.turns)} task(s))", ""]
+    for i, turn in enumerate(sess.turns[-HISTORY_TURNS:], 1):
+        lines.append(f"{i}. {t.b(turn.task[:90])}")
+        lines.append(f"   {turn.digest[:200]}")
+    return "\n".join(lines)
+
+
+def _set_mode(sess: Session, arg: str, t: Transport) -> str:
     arg = (arg or "").strip().lower()
     valid = {"auto"} | set(providers.BY_NAME)
     if arg not in valid:
         return (f"Pick one of: {', '.join(sorted(valid))}. "
-                f"Currently {t.b(_mode.get(convo, 'auto'))}.")
-    _mode[convo] = arg
+                f"Currently {t.b(sess.mode)}.")
+    sess.mode = arg
     return (f"Routing pinned to {t.b(arg)} here."
             if arg != "auto" else f"Routing back to {t.b('auto')} — weighed per subtask.")
 
 
-async def _run_task(convo: str, task: str, t: Transport) -> None:
-    """Stream one dispatch into a conversation.
+async def _run_task(sess: Session, task: str, t: Transport) -> None:
+    """Run one task to completion and remember what it produced.
 
     Progress is one line that gets rewritten — wave, who is working, then the summary —
     rather than a new message per event. On a phone a dozen status messages bury the
@@ -247,12 +339,14 @@ async def _run_task(convo: str, task: str, t: Transport) -> None:
                 for a in agents_seen.values()]
         head = f"🐙 {t.b(task[:120])}"
         mid = f"Wave {waves} · {len(agents_seen)} agent(s)" if waves else "Planning…"
+        if sess.queue:
+            mid += f" · {len(sess.queue)} queued after this"
         return "\n".join([head, mid] + rows + ([note] if note else []))
 
     try:
-        mode = _mode.get(convo)
-        async for line in octopus.dispatch(_key(), task, None,
-                                           mode if mode and mode != "auto" else None):
+        mode = sess.mode if sess.mode != "auto" else None
+        async for line in octopus.dispatch(_key(), _context(sess, task), None, mode,
+                                           weigh_as=task):
             if not line.startswith("data:"):
                 continue
             try:
@@ -291,9 +385,10 @@ async def _run_task(convo: str, task: str, t: Transport) -> None:
                     sent_any = True
                     secs = (e.get("latency_ms") or 0) / 1000
                     foot = f"{info.get('provider', '')} · {info.get('model', '')} · {secs:.0f}s"
+                    body = text
                     if info.get("sources"):
-                        text += "\n\n" + t.b("Sources") + "\n" + "\n".join(info["sources"])
-                    await t.show(info.get("label", e["id"]), text,
+                        body += "\n\n" + t.b("Sources") + "\n" + "\n".join(info["sources"])
+                    await t.show(info.get("label", e["id"]), body,
                                  info.get("colour", ""), foot)
 
             elif kind == "error":
@@ -305,7 +400,7 @@ async def _run_task(convo: str, task: str, t: Transport) -> None:
                 await t.progress(f"🛑 {e.get('detail', 'dispatch failed')}")
 
             elif kind == "complete":
-                _last_cost[convo] = e.get("cost", {})
+                sess.last_cost = e.get("cost", {})
                 by = ", ".join(f"{v} {k}" for k, v in (e.get("by_provider") or {}).items())
                 cost = e.get("cost") or {}
                 money = "$%.4f" % cost["usd"] if cost.get("billable") else "free"
@@ -316,13 +411,45 @@ async def _run_task(convo: str, task: str, t: Transport) -> None:
                 await t.progress(board(summary))
                 if not sent_any:
                     await t.send("No agent produced any text.")
+
+        # Remember it, whatever happened. A task that failed is still context: without it
+        # a follow-up like "try that again" has nothing to refer to.
+        digest = " | ".join(
+            f"{a['label']}: {outputs.get(aid, '')[:160]}"
+            for aid, a in agents_seen.items() if outputs.get(aid))
+        sess.turns.append(Turn(task=task, digest=digest or "(no output)"))
+
     except asyncio.CancelledError:
+        sess.turns.append(Turn(task=task, digest="(cancelled)"))
         await t.progress(board("🛑 Stopped."))
         raise
     except Exception as err:
         await t.send(f"🛑 The run broke: {type(err).__name__}: {err}")
+
+
+async def _drain(sess: Session, t: Transport) -> None:
+    """Work through the queue, one task at a time, until it is empty.
+
+    Sequential on purpose. Two dispatches at once would interleave their answers in a
+    single chat with no way to tell which belonged to which, and would double the load on
+    rate limits that are already the tightest constraint here.
+    """
+    try:
+        while sess.queue:
+            task = sess.queue.popleft()
+            sess.current = task
+            sess.running = asyncio.create_task(_run_task(sess, task, t))
+            try:
+                await sess.running
+            except asyncio.CancelledError:
+                # /stop cancels the running task, not the session. Anything still queued
+                # is work the user asked for and has not withdrawn.
+                pass
+            finally:
+                sess.running = None
+                sess.current = ""
     finally:
-        _runs.pop(convo, None)
+        sess.worker = None
 
 
 # Discord's client swallows anything beginning with '/' and tries to match it against
@@ -347,6 +474,7 @@ async def handle(convo: str, text: str, t: Transport) -> None:
     text = text.strip()
     if not text:
         return
+    sess = session(convo)
 
     if is_command(text):
         cmd, arg = command_of(text)
@@ -357,27 +485,55 @@ async def handle(convo: str, text: str, t: Transport) -> None:
         elif cmd == "models":
             await t.send(await _models(t))
         elif cmd == "cost":
-            await t.send(_cost(convo, t))
+            await t.send(_cost(sess, t))
         elif cmd == "mode":
-            await t.send(_set_mode(convo, arg, t))
+            await t.send(_set_mode(sess, arg, t))
         elif cmd == "web":
             await t.send(await _web(arg, t))
+        elif cmd in ("queue", "q"):
+            await t.send(_queue_view(sess, t))
+        elif cmd in ("history", "context"):
+            await t.send(_history_view(sess, t))
+        elif cmd in ("new", "reset", "clear"):
+            # Ends the session: forgets the thread and drops anything not yet started.
+            # The run in flight is left alone — it is already being paid for.
+            dropped = len(sess.queue)
+            remembered = len(sess.turns)
+            sess.queue.clear()
+            sess.turns.clear()
+            sess.last_cost = {}
+            sess.started = time.time()
+            await t.send(f"🐙 {t.b('New session')} — forgot {remembered} task(s)"
+                         + (f", dropped {dropped} queued" if dropped else "")
+                         + (". The run in progress will finish." if sess.running else "."))
         elif cmd == "stop":
-            task = _runs.get(convo)
-            if task and not task.done():
-                task.cancel()
+            if sess.running and not sess.running.done():
+                sess.running.cancel()
+            elif sess.queue:
+                n = len(sess.queue)
+                sess.queue.clear()
+                await t.send(f"Cleared {n} queued task(s). Nothing was running.")
             else:
                 await t.send("Nothing running.")
         else:
             await t.send(f"Unknown command /{cmd}.\n\n{help_text(t)}")
         return
 
-    if convo in _runs and not _runs[convo].done():
-        await t.send(BUSY)
+    # Not a command, so it is work. It is always accepted — the whole point of a queue is
+    # that you can keep thinking while something runs.
+    if len(sess.queue) >= MAX_QUEUE:
+        await t.send(f"Queue is full ({MAX_QUEUE}). Send /queue to see it, "
+                     f"or /stop to clear it.")
         return
 
-    pin = _mode.get(convo, "auto")
-    # Through progress(), not send(): this is the first version of the status line the
-    # run then keeps rewriting, so the acknowledgement costs no extra message.
+    sess.queue.append(text)
+
+    if sess.busy:
+        ahead = len(sess.queue)
+        await t.send(f"➕ {t.b('Queued')} — {ahead} ahead of it. "
+                     f"Running: {t.i(sess.current[:60] or 'something')}")
+        return
+
+    pin = sess.mode
     await t.progress(f"🐙 Working on it — routing {t.b(pin)}…")
-    _runs[convo] = asyncio.create_task(_run_task(convo, task=text, t=t))
+    sess.worker = asyncio.create_task(_drain(sess, t))
