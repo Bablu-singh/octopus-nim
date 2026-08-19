@@ -202,6 +202,11 @@ planner handed a paragraph of previous results will otherwise plan agents to red
 And the router weighs the *original* task, not the context-prefixed one: a long history
 would otherwise count someone else's earlier request as evidence that this one is heavy.
 
+The browser has the same thing: **Dispatch never blocks** — a second task queues under the
+box with the running one, removable with ✕ — and **New session** forgets the thread and
+drops the queue. The session id lives in `localStorage`, and the memory is the *same store*
+the chat doors use, reached by passing `session` to `/api/dispatch`.
+
 | Command | |
 |---|---|
 | `/queue` | what is running, what is waiting |
@@ -401,6 +406,8 @@ for streaming it is the gap between chunks), and `NIM_PROBE_TIMEOUT`.
 | GET/POST | `/api/whatsapp` | Meta webhook: handshake, then inbound messages |
 | GET | `/api/whatsapp/health` | Is WhatsApp wired up? Never returns the token or secret |
 | GET | `/api/discord/health` | Is the bot connected? Never returns the token |
+| GET | `/api/session/{id}` | What a session remembers, and what it is doing |
+| POST | `/api/session/{id}/new` | End a session: forget the thread, drop the queue |
 | GET | `/api/models` | Every model ID one provider lists (`?provider=local`) |
 | GET | `/api/catalog` | Which of those actually answer, grouped, with per-provider bindings |
 | POST | `/api/dispatch` | Plan and run an agent pool over one task, streamed as SSE |

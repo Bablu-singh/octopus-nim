@@ -28,6 +28,7 @@ import octopus
 import discordbot
 import providers
 import routing
+import chat_bridge
 import wa_bridge
 import wa_qr
 import web
@@ -345,15 +346,73 @@ class DispatchRequest(BaseModel):
     # 'auto' (default), 'local', or 'nvidia'. Pinning is for working offline or for
     # comparing the two; auto is the point of the router.
     mode: str | None = None
+    # Conversation id. When present the task is dispatched with this session's earlier
+    # turns as context, and the result is recorded back into it — the same store the
+    # Discord and WhatsApp doors use, so a session is a session wherever it is driven
+    # from. Absent means a one-off with no memory, which is what this used to be.
+    session: str | None = None
 
 
 @app.post("/api/dispatch")
 async def api_dispatch(req: DispatchRequest, x_nim_key: str | None = Header(default=None)):
+    key = _optional_key(x_nim_key)
+
+    if not req.session:
+        return StreamingResponse(
+            octopus.dispatch(key, req.task, req.roles, req.mode),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def with_memory():
+        """Stream the run through untouched, and keep a digest of it afterwards.
+
+        The browser wants raw dispatch events, not chat messages, so it cannot go through
+        the Transport path — but it should still share the session store. The events are
+        passed along verbatim and only observed in passing, so the UI sees exactly what it
+        saw before.
+        """
+        outputs: dict[str, str] = {}
+        labels: dict[str, str] = {}
+        try:
+            async for line in octopus.dispatch(
+                key, chat_bridge.context_for(req.session, req.task), req.roles, req.mode,
+                weigh_as=req.task,
+            ):
+                yield line
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    e = json.loads(line[5:])
+                except ValueError:
+                    continue
+                if e.get("event") == "wave":
+                    for a in e.get("agents", []):
+                        labels[a["id"]] = a.get("label", a["id"])
+                elif e.get("event") == "chunk":
+                    outputs[e["id"]] = outputs.get(e["id"], "") + e.get("text", "")
+        finally:
+            digest = " | ".join(f"{labels.get(aid, aid)}: {text[:160]}"
+                                for aid, text in outputs.items() if text)
+            chat_bridge.remember(req.session, req.task, digest)
+
     return StreamingResponse(
-        octopus.dispatch(_optional_key(x_nim_key), req.task, req.roles, req.mode),
+        with_memory(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/session/{convo}")
+async def api_session(convo: str) -> dict:
+    """What this session remembers, and what it is doing."""
+    return chat_bridge.summary(convo)
+
+
+@app.post("/api/session/{convo}/new")
+async def api_session_new(convo: str) -> dict:
+    """End a session: forget the thread and drop anything queued."""
+    return {"cleared": chat_bridge.forget(convo)}
 
 
 @app.get("/api/health")

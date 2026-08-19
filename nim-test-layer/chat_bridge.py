@@ -198,6 +198,46 @@ def active_runs() -> int:
     return sum(1 for s in _sessions.values() if s.busy)
 
 
+def context_for(convo: str, task: str) -> str:
+    """The context-prefixed task for a conversation. Public so the browser shares it.
+
+    The web UI streams raw dispatch events rather than chat messages, so it cannot use
+    the Transport path — but there is no reason for it to have a second, separate memory.
+    One session store, three front doors.
+    """
+    return _context(session(convo), task)
+
+
+def remember(convo: str, task: str, digest: str) -> None:
+    """Record a finished turn from a caller that ran the dispatch itself."""
+    sess = session(convo)
+    sess.turns.append(Turn(task=task, digest=digest or "(no output)"))
+
+
+def forget(convo: str) -> dict:
+    """End a session. Returns what was dropped, for reporting."""
+    sess = session(convo)
+    dropped = {"turns": len(sess.turns), "queued": len(sess.queue)}
+    sess.queue.clear()
+    sess.turns.clear()
+    sess.last_cost = {}
+    sess.started = time.time()
+    return dropped
+
+
+def summary(convo: str) -> dict:
+    sess = session(convo)
+    return {
+        "convo": convo,
+        "turns": [{"task": t.task, "digest": t.digest, "at": t.at} for t in sess.turns],
+        "queued": list(sess.queue),
+        "current": sess.current,
+        "busy": sess.busy,
+        "mode": sess.mode,
+        "open_seconds": int(time.time() - sess.started),
+    }
+
+
 def _context(sess: Session, task: str) -> str:
     """The task as the planner should see it: what came before, then what to do now.
 

@@ -99,6 +99,20 @@
   button.go:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
   button.go:focus-visible{outline:2px solid var(--glow);outline-offset:3px}
   .why{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:11px;min-height:1.2em}
+  button.ghost{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    background:transparent;color:var(--muted);border:1px solid var(--ridge);border-radius:8px;
+    padding:9px 14px;cursor:pointer;transition:color .2s,border-color .2s}
+  button.ghost:hover{color:var(--text);border-color:var(--edge)}
+  /* Queued work, so submitting while a run is going is visibly accepted rather than
+     silently swallowed. */
+  .queue{margin-top:10px;display:flex;flex-direction:column;gap:5px}
+  .queue .q{display:flex;gap:9px;align-items:baseline;font-family:var(--mono);font-size:11.5px;
+    color:var(--muted);background:#08202880;border:1px solid var(--ridge);
+    border-radius:8px;padding:7px 11px;animation:rise .3s ease both}
+  .queue .q b{color:var(--glow);font-weight:500}
+  .queue .q .drop{margin-left:auto;cursor:pointer;color:var(--muted);opacity:.7}
+  .queue .q .drop:hover{color:#ff9b8f;opacity:1}
+  .memo{font-family:var(--mono);font-size:11px;color:var(--muted);opacity:.75;margin-top:6px}
   .why .tag{color:var(--glow)}
 
   /* ---- results ---- */
@@ -232,9 +246,11 @@
     <textarea id="task" placeholder="Describe the task. Octopus works out what kind of work it is and how many agents it needs.">Migrate our billing monolith to microservices: assess the risks, write the extraction code for the invoice module, plan the cutover, and draft the customer announcement.</textarea>
     <div class="bar">
       <div class="hint" id="hint">it reads the task and sizes the swarm itself — nothing to pick</div>
+      <button class="ghost" id="newsess" title="Forget this conversation and drop the queue">New session</button>
       <button class="go" id="go">Dispatch</button>
     </div>
     <div class="why" id="why"></div>
+    <div class="queue" id="queue"></div>
   </div>
 
   <div class="results" id="results"></div>
@@ -470,11 +486,62 @@ async function loadCatalog() {
   }
 }
 
+/* ---------- session ----------
+   The browser gets the same session store as the Discord and WhatsApp doors, keyed by an
+   id it keeps in localStorage. That is what makes "now make that shorter" work here too,
+   and why New Session is a real action rather than just clearing the screen. */
+const SESSION_KEY = "octopus.session";
+let SESSION = localStorage.getItem(SESSION_KEY);
+if (!SESSION) {
+  SESSION = "web-" + Math.random().toString(36).slice(2, 10);
+  localStorage.setItem(SESSION_KEY, SESSION);
+}
+
+/* Queued tasks, client side. A dispatch streams over one connection for minutes, so the
+   queue lives here and feeds that connection one task at a time — the same sequential
+   rule the chat doors follow, and for the same reason: two runs at once would interleave
+   their cards with no way to tell them apart. */
+const QUEUE = [];
+let RUNNING = false;
+
+function paintQueue() {
+  const box = $("queue");
+  box.innerHTML = QUEUE.map((task, i) =>
+    `<div class="q"><b>${i + 1}</b><span>${esc(task.slice(0, 110))}</span>` +
+    `<span class="drop" data-i="${i}" title="Remove">✕</span></div>`).join("");
+  box.querySelectorAll(".drop").forEach(el => {
+    el.onclick = () => { QUEUE.splice(+el.dataset.i, 1); paintQueue(); };
+  });
+  $("go").textContent = RUNNING && QUEUE.length ? `Queue (${QUEUE.length})`
+                      : RUNNING ? "Queue" : "Dispatch";
+}
+
+async function refreshMemo() {
+  try {
+    const d = await (await fetch(API + "/api/session/" + SESSION)).json();
+    const n = (d.turns || []).length;
+    $("hint").innerHTML = n
+      ? `session <b>${esc(SESSION)}</b> · remembers ${n} task${n === 1 ? "" : "s"}`
+      : "it reads the task and sizes the swarm itself — nothing to pick";
+  } catch { /* the hint is decoration; never let it break dispatching */ }
+}
+
+$("newsess").onclick = async () => {
+  try { await fetch(API + "/api/session/" + SESSION + "/new", {method: "POST"}); } catch {}
+  SESSION = "web-" + Math.random().toString(36).slice(2, 10);
+  localStorage.setItem(SESSION_KEY, SESSION);
+  QUEUE.length = 0;
+  paintQueue();
+  $("results").innerHTML = "";
+  $("limbs").innerHTML = "";
+  A.clear(); waves = 0;
+  layout();
+  $("why").innerHTML = `<span class="tag">new session</span> previous conversation forgotten`;
+  refreshMemo();
+};
+
 /* ---------- dispatch ---------- */
-$("go").onclick = async () => {
-  const task = $("task").value.trim();
-  if (!task) return;
-  $("go").disabled = true;
+async function runOne(task) {
   $("results").innerHTML = "";
   $("limbs").innerHTML = "";
   A.clear(); waves = 0;
@@ -489,10 +556,35 @@ $("go").onclick = async () => {
   try {
     const r = await fetch(API + "/api/dispatch", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({task})          // no role selection: the planner decides
+      // no role selection: the planner decides. `session` is what gives it memory.
+      body: JSON.stringify({task, session: SESSION})
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+    await consume(r);
+  } catch (err) {
+    $("why").innerHTML = `<span class="fail">${esc(err.message)}</span>`;
+  }
+  clearInterval(timer);
+  metrics();
+  refreshMemo();
+}
 
+async function pump() {
+  if (RUNNING) return;
+  RUNNING = true;
+  $("go").disabled = false;          // stays live: submitting during a run is the point
+  while (QUEUE.length) {
+    const task = QUEUE.shift();
+    paintQueue();
+    await runOne(task);
+  }
+  RUNNING = false;
+  paintQueue();
+}
+
+/* Reads one dispatch stream to the end. Unchanged from the original handler —
+   lifting it out is what lets the queue feed it task after task. */
+async function consume(r) {
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = "";
     while (true) {
@@ -604,12 +696,17 @@ $("go").onclick = async () => {
         }
       }
     }
-  } catch (err) {
-    $("why").innerHTML = `<span class="fail">${esc(err.message)}</span>`;
-  }
-  clearInterval(timer);
-  metrics();
-  $("go").disabled = false;
+}
+
+/* Dispatch never blocks now: it appends to the queue and lets the pump drain it, so
+   a second task can be written while the first is still running. */
+$("go").onclick = () => {
+  const task = $("task").value.trim();
+  if (!task) return;
+  QUEUE.push(task);
+  $("task").value = "";
+  paintQueue();
+  pump();
 };
 
 $("task").addEventListener("keydown", e => {
