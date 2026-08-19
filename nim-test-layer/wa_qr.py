@@ -74,6 +74,9 @@ _state = {"connected": False, "qr": None, "me": None, "error": None}
 _sent_ids: "OrderedDict[str, float]" = OrderedDict()
 SENT_MAX = 300
 
+# LID -> phone number, once resolved. The mapping does not change.
+_lid_cache: dict[str, str] = {}
+
 
 def _remember_sent(msg_id: str) -> None:
     if not msg_id:
@@ -108,6 +111,31 @@ def _digits(jid) -> str:
     return "".join(ch for ch in str(raw).split("@")[0].split(":")[0] if ch.isdigit())
 
 
+def _resolve_lid(jid) -> str:
+    """Ask the client which phone number a LID belongs to, or '' if it cannot say.
+
+    WhatsApp increasingly addresses people only by LID: the message carries the LID and
+    `SenderAlt` is empty, so there is nothing in the event itself to compare against an
+    allowlist of phone numbers. whatsmeow keeps the mapping, so the client is asked.
+    Cached, because this is a round trip and every inbound message would otherwise pay
+    for it.
+    """
+    key = _digits(jid)
+    if not key:
+        return ""
+    if key in _lid_cache:
+        return _lid_cache[key]
+    number = ""
+    try:
+        if _client is not None:
+            number = _digits(_client.get_pn_from_lid(jid))
+    except Exception as err:
+        if DEBUG:
+            print(f"[wa-qr]   lid lookup failed: {type(err).__name__}: {err}", flush=True)
+    _lid_cache[key] = number
+    return number
+
+
 def _identities(source) -> tuple[set[str], str]:
     """Every number this sender could be known by, and the phone one if we can tell.
 
@@ -129,6 +157,11 @@ def _identities(source) -> tuple[set[str], str]:
         # s.whatsapp.net is the phone-number namespace; lid is not.
         if str(getattr(jid, "Server", "")).startswith("s.whatsapp"):
             phone = phone or num
+        elif str(getattr(jid, "Server", "")).startswith("lid"):
+            resolved = _resolve_lid(jid)
+            if resolved:
+                ids.add(resolved)
+                phone = phone or resolved
     return ids, phone
 
 
@@ -225,7 +258,6 @@ def _run_client() -> None:
         _state["error"] = "logged out — the device was unlinked from the phone"
         print("[wa-qr] logged out", flush=True)
 
-    @client.event(MessageEv)
     @client.event(MessageEv)
     def _on_message(_c, message) -> None:
         """Inbound. Every early return says why when DEBUG is on.
