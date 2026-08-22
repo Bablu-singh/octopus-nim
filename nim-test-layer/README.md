@@ -222,6 +222,14 @@ reloading per utterance would cost more than speaking does.
 spoke, which is the rule a conversation already follows: answer in the medium you were
 addressed in.
 
+**It breathes.** Each sentence is synthesised on its own and joined with real silence —
+half a second after a full stop, a fifth after a colon — because Kokoro's own
+`sentence_pause` argument is ignored by the published model export (0.0 and 1.0 produce
+identical audio; it only applies in a `continuous` mode that needs a different export).
+Markdown headings and list items also arrive with no terminal punctuation once the markup
+is stripped, so a full stop is added per line — otherwise "Migration plan Freeze writes
+Verify checksums" is delivered in one unbroken breath. Tune with `VOICE_SENTENCE_PAUSE`.
+
 **It speaks; it does not sing.** Piper is a text-to-speech engine with no melody, pitch
 control or rhythm, so "sing me a song" produces lyrics read aloud in a flat voice. Singing
 needs a different class of model (RVC, so-vits-svc) and is not what this is.

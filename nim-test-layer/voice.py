@@ -47,6 +47,11 @@ ENGINE = os.getenv("VOICE_ENGINE", "kokoro").strip().lower()
 KOKORO_EN = os.getenv("VOICE_KOKORO_EN", "af_heart")
 KOKORO_HI = os.getenv("VOICE_KOKORO_HI", "hf_alpha")
 SPEED = float(os.getenv("VOICE_SPEED", "1.0"))
+# Breathing. Kokoro takes an explicit pause after a sentence and after a clause, and its
+# defaults (0.25 / 0.10) run everything together into one flat stream. Raising them is
+# most of the difference between a machine reading and a person talking.
+SENTENCE_PAUSE = float(os.getenv("VOICE_SENTENCE_PAUSE", "0.5"))
+CLAUSE_PAUSE = float(os.getenv("VOICE_CLAUSE_PAUSE", "0.22"))
 # Only used when ENGINE=piper. Any voice from rhasspy/piper-voices.
 PIPER_VOICE = os.getenv("VOICE_PIPER_MODEL", "en_US-lessac-medium")
 # 'small', not 'base', and multilingual, not '.en' — both chosen by measurement rather
@@ -111,6 +116,20 @@ def speakable(text: str) -> str:
     text = _MARK.sub("", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{2,}", "\n", text).strip()
+
+    # Give every line something to breathe on. Headings, list items and table cells
+    # arrive with no terminal punctuation once the markup is stripped, so the
+    # synthesiser runs them together in one unbroken breath and its sentence pause has
+    # nothing to attach to. A full stop per line is what turns that back into speech.
+    kept = []
+    for line in text.split(chr(10)):
+        line = line.strip()
+        if not line:
+            continue
+        if line[-1] not in ".!?:;,":
+            line += "."
+        kept.append(line)
+    text = " ".join(kept)
     if len(text) > MAX_SPEAK_CHARS:
         # Cut on a sentence boundary if there is one nearby, so it does not stop mid-word.
         cut = text[:MAX_SPEAK_CHARS]
@@ -200,23 +219,60 @@ def _load_piper():
     return _tts
 
 
-def _synth(text: str) -> bytes:
-    lang = detect_lang(text)
-    if ENGINE == "kokoro":
-        k = _load_kokoro()
-        samples, rate = k.create(
-            text,
-            voice=KOKORO_HI if lang == "hi" else KOKORO_EN,
-            # kokoro takes espeak's tag for English and a plain code for Hindi.
-            lang="hi" if lang == "hi" else "en-us",
-            speed=SPEED)
-        return _pcm_wav(samples, rate)
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?:])\s+")
 
+
+def _synth(text: str) -> bytes:
+    """Speak the text, breathing between sentences.
+
+    Kokoro takes `sentence_pause` and `clause_pause` arguments and, in this build,
+    ignores both: synthesising the same text with 0.0 and 1.0 produces byte-identical
+    length. They only apply in `continuous` mode, which needs a model export that reports
+    per-phoneme durations — not the published one. Piper has no pause control at all.
+
+    So the pause is inserted here instead. Each sentence is synthesised on its own and
+    joined with real silence, which is both more reliable than the parameter and more
+    controllable: the gap is exactly as long as it is set to be. It costs one model call
+    per sentence, and those are fractions of a second.
+    """
+    lang = detect_lang(text)
+    pieces = [s for s in SENTENCE_SPLIT.split(text) if s.strip()]
+    if not pieces:
+        return b""
+
+    if ENGINE == "kokoro":
+        import numpy as np
+        k = _load_kokoro()
+        voice_name = KOKORO_HI if lang == "hi" else KOKORO_EN
+        chunks, rate = [], 24000
+        gap = None
+        for i, piece in enumerate(chunks_iter := pieces):
+            samples, rate = k.create(piece, voice=voice_name,
+                                     lang="hi" if lang == "hi" else "en-us",
+                                     speed=SPEED)
+            chunks.append(np.asarray(samples, dtype="float32"))
+            if i < len(chunks_iter) - 1:
+                # A longer breath after a full stop than after a colon or a clause end.
+                pause = SENTENCE_PAUSE if piece.rstrip()[-1:] in ".!?" else CLAUSE_PAUSE
+                chunks.append(np.zeros(int(rate * pause), dtype="float32"))
+        return _pcm_wav(np.concatenate(chunks), rate)
+
+    # piper: same idea, stitched through the wave module since it writes WAV directly.
+    import numpy as np
     voice_obj = _load_piper()
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        voice_obj.synthesize_wav(text, w)
-    return buf.getvalue()
+    chunks, rate = [], 22050
+    for i, piece in enumerate(pieces):
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            voice_obj.synthesize_wav(piece, w)
+        with wave.open(io.BytesIO(buf.getvalue())) as r:
+            rate = r.getframerate()
+            raw = np.frombuffer(r.readframes(r.getnframes()), dtype="<i2")
+        chunks.append(raw.astype("float32") / 32767.0)
+        if i < len(pieces) - 1:
+            pause = SENTENCE_PAUSE if piece.rstrip()[-1:] in ".!?" else CLAUSE_PAUSE
+            chunks.append(np.zeros(int(rate * pause), dtype="float32"))
+    return _pcm_wav(np.concatenate(chunks), rate)
 
 
 async def speak(text: str) -> bytes:
@@ -339,6 +395,7 @@ def status() -> dict:
         "tts_loaded": _tts is not None,
         "stt_loaded": _stt is not None,
         "stt_lang": STT_LANG or "auto",
+        "pauses": {"sentence": SENTENCE_PAUSE, "clause": CLAUSE_PAUSE},
         "max_chars": MAX_SPEAK_CHARS,
         "errors": {k: v for k, v in _state.items() if v},
     }
