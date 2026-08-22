@@ -50,37 +50,50 @@
   .pill b{color:var(--glow);font-weight:500;font-variant-numeric:tabular-nums}
   .pill.hot{border-color:var(--glow);color:var(--text)}
 
-  /* ---- the octopus ---- */
+  /* ---- the studio ---- */
   .creature{position:relative;margin:0 auto 4px;max-width:660px}
-  svg.oct{width:100%;height:auto;display:block;overflow:visible}
-  .body{transform-origin:310px 96px;animation:breathe 6s ease-in-out infinite}
-  @keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.035)}}
-  .mantle{fill:url(#mg);stroke:var(--edge);stroke-width:1.5}
-  .halo{fill:none;stroke:var(--glow);stroke-width:1;opacity:0}
-  .halo.on{animation:ring 1.8s ease-out infinite}
-  @keyframes ring{0%{opacity:.5;transform:scale(1)}100%{opacity:0;transform:scale(1.5)}}
-  .eye{fill:var(--abyss)}
-  .pupil{fill:var(--glow);animation:blink 7s infinite}
-  @keyframes blink{0%,94%,100%{transform:scaleY(1)}97%{transform:scaleY(.1)}}
+  svg.office{width:100%;height:auto;display:block;overflow:visible}
+  svg.office.working .moon{opacity:.9}
+  svg.office.working .window rect{stroke:#2a6d85}
+  .sign{font-family:var(--mono);font-size:8px;fill:var(--muted);letter-spacing:.14em}
+  .moon{animation:glow 6s ease-in-out infinite}
+  .stars circle{animation:twinkle 4s ease-in-out infinite}
+  .stars circle:nth-child(2){animation-delay:1.1s}
+  .stars circle:nth-child(3){animation-delay:2.3s}
+  .stars circle:nth-child(4){animation-delay:3.1s}
+  @keyframes twinkle{0%,100%{opacity:.25}50%{opacity:.9}}
+  @keyframes glow{0%,100%{opacity:.5}50%{opacity:.8}}
+  .plant path{transform-origin:bottom center;animation:sway 7s ease-in-out infinite}
+  @keyframes sway{0%,100%{transform:rotate(-2deg)}50%{transform:rotate(2deg)}}
 
-  .arm{fill:none;stroke-width:5.5;stroke-linecap:round;opacity:.30;
-       transition:opacity .5s ease,stroke-width .5s ease}
-  .arm.grow{animation:draw 1s cubic-bezier(.3,.8,.4,1) forwards}
-  @keyframes draw{from{stroke-dashoffset:var(--len)}to{stroke-dashoffset:0}}
-  .arm.busy{opacity:1;stroke-width:7.5;filter:drop-shadow(0 0 10px currentColor)}
-  .arm.done{opacity:.7;stroke-width:5.5}
-  .arm.failed{opacity:.42;stroke-dasharray:3 10 !important;stroke-dashoffset:0 !important}
-  .flow{fill:none;stroke:#eafffb;stroke-width:2.5;stroke-linecap:round;opacity:0;
-        stroke-dasharray:12 200}
-  .limb.busy .flow{opacity:.9;animation:swim 1.4s linear infinite}
-  @keyframes swim{from{stroke-dashoffset:212}to{stroke-dashoffset:0}}
-  .tip{fill:currentColor;opacity:0;transition:opacity .4s}
-  .limb.busy .tip{opacity:1;animation:throb 1.4s ease-in-out infinite}
-  .limb.done .tip{opacity:.75}
-  @keyframes throb{0%,100%{r:3}50%{r:5.5}}
-  .alabel{font-family:var(--mono);font-size:9px;fill:var(--muted);letter-spacing:.06em;
-          opacity:0;transition:opacity .4s}
-  .limb.busy .alabel,.limb.done .alabel,.limb.failed .alabel{opacity:.95;fill:var(--text)}
+  /* a desk appears only when someone is using it */
+  .desk .top{fill:#123c4e;stroke:#1b5064;stroke-width:1}
+  .desk .leg{fill:#0e3243}
+  .desk .mon{fill:#04161d;stroke:#1b5064;stroke-width:1}
+  .desk .glare{fill:currentColor;opacity:0}
+  .desk.busy .glare{opacity:.5;animation:flicker 1.6s ease-in-out infinite}
+  .desk.done .glare{opacity:.22}
+  .desk.failed .glare{opacity:.14;fill:#ff9b8f}
+  @keyframes flicker{0%,100%{opacity:.28}50%{opacity:.6}}
+
+  /* the person: walks in from the door, then sits and works */
+  .person{transition:transform 1.15s cubic-bezier(.34,.8,.36,1)}
+  .person .shadow{fill:#04141d;opacity:.45}
+  .person .torso{fill:currentColor}
+  .person .head{fill:#f4e0c8}
+  .person .arm2{stroke:currentColor;stroke-width:2.4;stroke-linecap:round}
+  .person.busy .torso{animation:type 1.1s ease-in-out infinite}
+  @keyframes type{0%,100%{transform:translateY(0)}50%{transform:translateY(-1.1px)}}
+  .person.done .torso{transform:translateY(1px)}
+  .person.failed{opacity:.55}
+  .person .tag{font-family:var(--mono);font-size:7.5px;fill:var(--muted);letter-spacing:.02em}
+  .person.busy .tag,.person.done .tag{fill:var(--text)}
+  .person .prov2{font-family:var(--mono);font-size:6.5px;letter-spacing:.06em}
+  .person .mark{font-size:9px;opacity:0;transition:opacity .4s}
+  .person.done .mark,.person.failed .mark{opacity:1}
+  /* a little lamp pool under whoever is actually working */
+  .person .pool{fill:url(#lamp);opacity:0;transition:opacity .5s}
+  .person.busy .pool{opacity:1}
 
   /* ---- task bar ---- */
   .console{background:linear-gradient(180deg,#0b2836,#082129);border:1px solid var(--ridge);
@@ -241,22 +254,62 @@
   </div>
 
   <div class="creature">
-    <svg class="oct" viewBox="0 0 620 400" xmlns="http://www.w3.org/2000/svg"
-         aria-label="Agent tentacles, one per running agent">
+    <!-- The studio. Each running agent is a person at a desk: they walk in through the
+         door, sit down, work while their monitor glows in their role's colour, and lean
+         back when they finish. It is the same information the old tentacles carried —
+         who is working, on what, where — in a form that reads at a glance. -->
+    <svg class="office" viewBox="0 0 620 330" xmlns="http://www.w3.org/2000/svg"
+         aria-label="Agents at work in the studio, one person per running agent">
       <defs>
-        <radialGradient id="mg" cx="50%" cy="35%">
-          <stop offset="0%" stop-color="#1d5f74"/><stop offset="100%" stop-color="#0a2b38"/>
+        <linearGradient id="floorg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#0d2f3d"/><stop offset="100%" stop-color="#071e28"/>
+        </linearGradient>
+        <linearGradient id="wallg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#0a2836"/><stop offset="100%" stop-color="#0c3040"/>
+        </linearGradient>
+        <radialGradient id="lamp" cx="50%" cy="0%">
+          <stop offset="0%" stop-color="#7ff2e0" stop-opacity=".22"/>
+          <stop offset="100%" stop-color="#7ff2e0" stop-opacity="0"/>
         </radialGradient>
       </defs>
-      <g id="limbs"></g>
-      <g class="body">
-        <ellipse class="halo" id="halo" cx="310" cy="96" rx="64" ry="54"/>
-        <ellipse class="mantle" cx="310" cy="96" rx="62" ry="52"/>
-        <ellipse class="eye" cx="290" cy="92" rx="9" ry="11"/>
-        <ellipse class="eye" cx="330" cy="92" rx="9" ry="11"/>
-        <circle class="pupil" cx="290" cy="93" r="3.4" style="transform-origin:290px 93px"/>
-        <circle class="pupil" cx="330" cy="93" r="3.4" style="transform-origin:330px 93px"/>
+
+      <!-- room -->
+      <rect x="18" y="10" width="584" height="86" fill="url(#wallg)" rx="6"/>
+      <rect x="18" y="94" width="584" height="224" fill="url(#floorg)" rx="6"/>
+      <line x1="18" y1="94" x2="602" y2="94" stroke="#164457" stroke-width="1.5"/>
+
+      <!-- night window, because this thing mostly runs late -->
+      <g class="window">
+        <rect x="360" y="24" width="190" height="56" rx="4" fill="#061a24" stroke="#1b5064"/>
+        <line x1="455" y1="24" x2="455" y2="80" stroke="#1b5064"/>
+        <circle class="moon" cx="520" cy="40" r="7" fill="#cfeef0" opacity=".65"/>
+        <g class="stars">
+          <circle cx="385" cy="38" r="1.1" fill="#cfeef0"/>
+          <circle cx="410" cy="55" r="1"   fill="#cfeef0"/>
+          <circle cx="432" cy="33" r="1.2" fill="#cfeef0"/>
+          <circle cx="480" cy="62" r="1"   fill="#cfeef0"/>
+        </g>
       </g>
+
+      <!-- door: everyone arrives through here -->
+      <g class="door">
+        <rect x="34" y="30" width="46" height="64" rx="3" fill="#0a2430" stroke="#1b5064"/>
+        <circle cx="72" cy="64" r="2.2" fill="#7ff2e0" opacity=".7"/>
+        <text x="57" y="22" class="sign" text-anchor="middle">IN</text>
+      </g>
+
+      <!-- a couple of plants, purely so it looks like somewhere -->
+      <g class="plant" transform="translate(572,300)">
+        <rect x="-9" y="0" width="18" height="14" rx="2" fill="#123c4e"/>
+        <path d="M0 0 C -12 -14 -8 -26 0 -30 C 8 -26 12 -14 0 0 Z" fill="#2b6b52"/>
+      </g>
+      <g class="plant" transform="translate(44,300)">
+        <rect x="-8" y="0" width="16" height="12" rx="2" fill="#123c4e"/>
+        <path d="M0 0 C -10 -12 -7 -22 0 -25 C 7 -22 10 -12 0 0 Z" fill="#2b6b52"/>
+      </g>
+
+      <g id="desks"></g>
+      <g id="people"></g>
     </svg>
   </div>
 
@@ -302,34 +355,96 @@ const ROLES = ["writer","coder","scheduler","imager","analyst"];
   }
 })();
 
-/* ---------- tentacle geometry ----------
-   One arm per agent, fanned around the mantle. The whole set is re-laid-out every time an
-   agent appears, so the creature visibly grows more limbs as the pool grows — there is no
-   fixed number of them. */
-const CX = 310, CY = 96, RX = 62, RY = 52;
-
-function armPath(i, n) {
-  // Fan wider as the pool grows, but stay wide enough that two or three arms still splay
-  // instead of hanging in a bunch under the mantle.
-  const spread = Math.min(0.78 + n * 0.045, 1.36);          // radians either side of down
-  const t = n === 1 ? 0 : (i / (n - 1)) * 2 - 1;            // -1 … 1
-  const a = t * spread;
-  const sin = Math.sin(a), cos = Math.cos(a);
-  const reach = 186 + (1 - Math.abs(t)) * 40;               // middle arms hang longer
-  const sx = CX + sin * RX * 0.78, sy = CY + cos * RY * 0.9;
-  const ex = CX + sin * reach * 1.18, ey = CY + cos * reach;
-  // Perpendicular curl at the tip, alternating side, so neighbours do not overlap.
-  const px = cos, py = -sin, curl = (i % 2 ? 1 : -1) * (16 + n * 0.8);
-  const c1x = CX + sin * reach * 0.46, c1y = CY + cos * reach * 0.5;
-  const c2x = ex - sin * reach * 0.24 + px * curl, c2y = ey - cos * reach * 0.24 + py * curl;
-  return {d:`M${sx.toFixed(1)},${sy.toFixed(1)} C${c1x.toFixed(1)},${c1y.toFixed(1)} ` +
-            `${c2x.toFixed(1)},${c2y.toFixed(1)} ${ex.toFixed(1)},${ey.toFixed(1)}`,
-          ex, ey, t};
+/* ---------- the studio ----------
+   Desks are laid out in two rows and handed out in order, so an agent keeps the same
+   seat for its whole life and the eye can follow it. Everyone enters at the door and
+   walks over, which is why the position is set twice: once where they came in, once
+   where they sit, with a CSS transition doing the walk. */
+const DOOR = {x: 57, y: 104};
+const SEATS = [];
+for (let row = 0; row < 2; row++) {
+  for (let col = 0; col < 5; col++) {
+    SEATS.push({x: 132 + col * 96, y: 132 + row * 74});
+  }
 }
 
-/* ---------- run state ---------- */
-const A = new Map();      // agent id -> {role,label,model,color,status,text,ms,el}
-let started = 0, timer = null, waves = 0;
+function seatFor(i) {
+  // More agents than desks is possible (24 is the ceiling). Extras share the floor in a
+  // third row rather than vanishing.
+  if (i < SEATS.length) return SEATS[i];
+  const k = i - SEATS.length;
+  return {x: 132 + (k % 5) * 96, y: 272};
+}
+
+function drawDesk(id, seat, colour) {
+  const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  g.id = "desk-" + id;
+  g.setAttribute("class", "desk");
+  g.setAttribute("transform", `translate(${seat.x},${seat.y})`);
+  g.style.color = colour;
+  g.innerHTML =
+    `<rect class="top" x="-30" y="6" width="60" height="8" rx="2"/>` +
+    `<rect class="leg" x="-26" y="14" width="4" height="14"/>` +
+    `<rect class="leg" x="22" y="14" width="4" height="14"/>` +
+    `<rect class="mon" x="-13" y="-14" width="26" height="19" rx="2"/>` +
+    `<rect class="glare" x="-11" y="-12" width="22" height="15" rx="1"/>`;
+  $("desks").appendChild(g);
+  return g;
+}
+
+function drawPerson(id, colour) {
+  const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  g.id = "who-" + id;
+  g.setAttribute("class", "person");
+  g.style.color = colour;
+  // Starts at the door. The transform is replaced a frame later and the transition walks.
+  g.setAttribute("transform", `translate(${DOOR.x},${DOOR.y})`);
+  g.innerHTML =
+    `<ellipse class="pool" cx="0" cy="4" rx="34" ry="16"/>` +
+    `<ellipse class="shadow" cx="0" cy="20" rx="11" ry="3.5"/>` +
+    `<path class="arm2" d="M-6 8 L-11 15"/>` +
+    `<path class="arm2" d="M6 8 L11 15"/>` +
+    `<rect class="torso" x="-7" y="2" width="14" height="17" rx="6"/>` +
+    `<circle class="head" cx="0" cy="-4" r="6"/>` +
+    `<text class="mark" x="13" y="-6"></text>` +
+    `<text class="tag" x="0" y="34" text-anchor="middle"></text>` +
+    `<text class="prov2" x="0" y="43" text-anchor="middle"></text>`;
+  $("people").appendChild(g);
+  return g;
+}
+
+function layout() {
+  const ids = [...A.keys()];
+  ids.forEach((id, i) => {
+    const a = A.get(id);
+    const seat = seatFor(i);
+    let person = document.getElementById("who-" + id);
+    if (!person) {
+      drawDesk(id, seat, a.color);
+      person = drawPerson(id, a.color);
+      // Next frame, so the browser has painted them at the door before the walk starts.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        person.setAttribute("transform", `translate(${seat.x},${seat.y - 14})`);
+      }));
+    }
+    const state = a.status === "queued" ? "" : a.status;
+    person.setAttribute("class", "person " + state);
+    document.getElementById("desk-" + id)?.setAttribute("class", "desk " + state);
+
+    const tag = person.querySelector(".tag");
+    const prov = person.querySelector(".prov2");
+    const mark = person.querySelector(".mark");
+    // Names get shorter as the room fills; past a dozen people they would just overlap.
+    tag.textContent = ids.length > 12 ? a.role.slice(0, 5)
+                    : (a.label || a.role).slice(0, 15);
+    prov.textContent = ids.length > 12 ? "" : (a.provider || "");
+    prov.setAttribute("fill", a.provider === "local" ? "#8ab4f8"
+                            : a.provider === "gemini" ? "#c9a6ff" : "#a8e63a");
+    mark.textContent = a.status === "done" ? "✓" : a.status === "failed" ? "✕" : "";
+    mark.setAttribute("fill", a.status === "failed" ? "#ff9b8f" : "#9fe86a");
+  });
+  metrics();
+}
 
 function metrics() {
   const all = [...A.values()];
@@ -341,50 +456,12 @@ function metrics() {
   $("p-failed").hidden = !bad;
   $("m-failed").textContent = bad;
   const busy = all.some(a => a.status === "busy");
-  $("halo").classList.toggle("on", busy);
+  // The window brightens while anyone is working — the room's version of the
+  // old halo, and the only global "something is happening" signal left.
+  document.querySelector("svg.office")?.classList.toggle("working", busy);
   document.querySelectorAll(".pill")[1].classList.toggle("hot", busy);
 }
 
-function layout() {
-  const ids = [...A.keys()], n = ids.length, box = $("limbs");
-  ids.forEach((id, i) => {
-    const a = A.get(id), geo = armPath(i, n);
-    let g = document.getElementById("limb-" + id);
-    if (!g) {
-      g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      g.id = "limb-" + id;
-      g.setAttribute("class", "limb");
-      g.style.color = a.color;
-      g.innerHTML =
-        `<path class="arm" stroke="${a.color}"/>` +
-        `<path class="flow"/>` +
-        `<circle class="tip" r="3.5"/>` +
-        `<text class="alabel" text-anchor="middle"></text>`;
-      box.appendChild(g);
-      // Draw the new arm on: dash the whole length, then run the offset to zero.
-      requestAnimationFrame(() => {
-        const p = g.querySelector(".arm"), len = p.getTotalLength();
-        p.style.setProperty("--len", len);
-        p.style.strokeDasharray = len;
-        p.classList.add("grow");
-      });
-    }
-    const arm = g.querySelector(".arm"), flow = g.querySelector(".flow");
-    const tip = g.querySelector(".tip"), lab = g.querySelector(".alabel");
-    arm.setAttribute("d", geo.d);
-    flow.setAttribute("d", geo.d);
-    flow.setAttribute("stroke", a.color);
-    tip.setAttribute("cx", geo.ex); tip.setAttribute("cy", geo.ey);
-    lab.setAttribute("x", geo.ex + geo.t * 22);
-    // Alternate rows: adjacent tips sit at similar heights and their labels would collide.
-    lab.setAttribute("y", geo.ey + 19 + (i % 2) * 13);
-    lab.textContent = n > 14 ? "" : (n > 8 ? a.role.slice(0, 4) : a.label.slice(0, 16));
-    arm.setAttribute("class", "arm " + (a.status === "queued" ? "" : a.status) +
-                              (arm.classList.contains("grow") ? " grow" : ""));
-    g.setAttribute("class", "limb " + (a.status === "queued" ? "" : a.status));
-  });
-  metrics();
-}
 
 /* ---------- markdown-lite ---------- */
 function render(text) {
@@ -666,7 +743,8 @@ $("newsess").onclick = async () => {
   QUEUE.length = 0;
   paintQueue();
   $("results").innerHTML = "";
-  $("limbs").innerHTML = "";
+  $("desks").innerHTML = "";
+  $("people").innerHTML = "";
   A.clear(); waves = 0; RID = 0; started = 0;
   clearInterval(timer);
   layout();
