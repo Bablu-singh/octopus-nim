@@ -126,8 +126,8 @@ def speakable(text: str) -> str:
         line = line.strip()
         if not line:
             continue
-        if line[-1] not in ".!?:;,":
-            line += "."
+        if line[-1] not in TERMINAL:
+            line += "।" if detect_lang(line) == "hi" else "."
         kept.append(line)
     text = " ".join(kept)
     if len(text) > MAX_SPEAK_CHARS:
@@ -219,7 +219,15 @@ def _load_piper():
     return _tts
 
 
-SENTENCE_SPLIT = re.compile(r"(?<=[.!?:])\s+")
+# Devanagari ends a sentence with a danda, not a full stop, so a splitter that knows
+# only ASCII punctuation never breaks Hindi at all and the whole answer arrives in one
+# breath. The danda and double danda are sentence ends; the ASCII set stays for
+# English and for the romanised Hindi people actually type.
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?:।॥])\s+")
+# Terminal marks, used when adding punctuation to a line that has none.
+TERMINAL = ".!?:;,।॥"
+# A danda closes a Hindi sentence the way a full stop closes an English one.
+FULL_STOPS = ".!?।॥"
 
 
 def _synth(text: str) -> bytes:
@@ -253,7 +261,7 @@ def _synth(text: str) -> bytes:
             chunks.append(np.asarray(samples, dtype="float32"))
             if i < len(chunks_iter) - 1:
                 # A longer breath after a full stop than after a colon or a clause end.
-                pause = SENTENCE_PAUSE if piece.rstrip()[-1:] in ".!?" else CLAUSE_PAUSE
+                pause = SENTENCE_PAUSE if piece.rstrip()[-1:] in FULL_STOPS else CLAUSE_PAUSE
                 chunks.append(np.zeros(int(rate * pause), dtype="float32"))
         return _pcm_wav(np.concatenate(chunks), rate)
 
@@ -270,7 +278,7 @@ def _synth(text: str) -> bytes:
             raw = np.frombuffer(r.readframes(r.getnframes()), dtype="<i2")
         chunks.append(raw.astype("float32") / 32767.0)
         if i < len(pieces) - 1:
-            pause = SENTENCE_PAUSE if piece.rstrip()[-1:] in ".!?" else CLAUSE_PAUSE
+            pause = SENTENCE_PAUSE if piece.rstrip()[-1:] in FULL_STOPS else CLAUSE_PAUSE
             chunks.append(np.zeros(int(rate * pause), dtype="float32"))
     return _pcm_wav(np.concatenate(chunks), rate)
 
