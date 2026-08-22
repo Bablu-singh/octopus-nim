@@ -16,6 +16,10 @@ Three providers are live today, and they are deliberately the three that cost no
   gemini  aistudio.google.com. Free tier, large models, and an OpenAI-compatible
           surface — which is why it is a ten-line row rather than an adapter.
 
+A second local slot, `localalt`, is registered and off. Nothing in this file is specific
+to Ollama; it speaks OpenAI-compatible HTTP and nothing else, so llama.cpp's llama-server,
+LM Studio, vLLM or LocalAI all drop in by pointing LOCAL_ALT_BASE_URL at them.
+
 Each becomes usable only when its credential is present, so the set of providers is
 whatever the machine can actually reach today. Missing keys are a state, not an error.
 
@@ -226,6 +230,31 @@ PROVIDERS: list[Provider] = [
         prefers="small",
         priority=0,
         rpm=int(os.getenv("LOCAL_RPM", "0")),
+    ),
+    Provider(
+        name="localalt",
+        label="Local (alt)",
+        enabled=_on("localalt", "0"),
+        # A second local engine alongside Ollama. Nothing here is Ollama-specific — the
+        # provider layer speaks OpenAI-compatible HTTP and nothing else — so this row
+        # takes llama.cpp's llama-server (port 8080), LM Studio (1234), vLLM or LocalAI
+        # without a line of code. Two local providers is the useful shape: the router
+        # already fails over between providers, so one engine going down is survivable,
+        # and two engines can be compared on the same task by pinning each in turn.
+        base_url=os.getenv("LOCAL_ALT_BASE_URL", "http://127.0.0.1:8080/v1"),
+        key_env=None,
+        tier="local",
+        blurb="A second local engine — llama.cpp, LM Studio, vLLM. Off unless enabled.",
+        disabled_note=("Off. Start another OpenAI-compatible server, set "
+                       "LOCAL_ALT_BASE_URL and ENABLE_LOCALALT=1."),
+        trust_catalog=os.getenv("LOCAL_ALT_TRUST_CATALOG", "1") != "0",
+        connect_timeout=_f("LOCAL_ALT_CONNECT_TIMEOUT", 5),
+        read_timeout=_f("LOCAL_ALT_READ_TIMEOUT", 300),
+        probe_timeout=_f("LOCAL_ALT_PROBE_TIMEOUT", 180),
+        max_tokens_cap=int(os.getenv("LOCAL_ALT_MAX_TOKENS", "700")),
+        rpm=int(os.getenv("LOCAL_ALT_RPM", "0")),
+        prefers="small",
+        priority=1,
     ),
     Provider(
         name="nvidia",

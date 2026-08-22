@@ -128,6 +128,30 @@ curl -s localhost:8000/api/route -H 'Content-Type: application/json' \
 Tune with `OCTOPUS_ROUTE` (`auto`, or any provider name to pin a run) and
 `OCTOPUS_ROUTE_THRESHOLD`.
 
+### Using something other than Ollama
+
+Nothing here is tied to Ollama. The provider layer speaks OpenAI-compatible HTTP and
+nothing else, so any engine that serves that API drops in:
+
+```bash
+ENABLE_LOCALALT=1
+LOCAL_ALT_BASE_URL=http://127.0.0.1:8080/v1   # llama.cpp llama-server
+```
+
+| Engine | Command | Port |
+|---|---|---|
+| llama.cpp | `llama-server -m model.gguf --port 8080` | 8080 |
+| LM Studio | enable the local server in the GUI | 1234 |
+| vLLM | `vllm serve <model> --port 8000` | 8000 |
+| LocalAI | `docker run … -p 8080:8080` | 8080 |
+
+It registers as a peer called `localalt`, so both engines can run at once: the router
+shares light work between them by least-loaded, and if one stops the other picks it up
+with no code change. Pin either with `OCTOPUS_ROUTE=local` or `=localalt` to compare them
+on the same task.
+
+Replacing Ollama outright is just `LOCAL_BASE_URL`.
+
 ### Adding Gemini
 
 Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey), put
