@@ -264,7 +264,8 @@
     <textarea id="task" placeholder="Describe the task. Octopus works out what kind of work it is and how many agents it needs.">Migrate our billing monolith to microservices: assess the risks, write the extraction code for the invoice module, plan the cutover, and draft the customer announcement.</textarea>
     <div class="bar">
       <div class="hint" id="hint">it reads the task and sizes the swarm itself — nothing to pick</div>
-      <button class="ghost" id="mic" title="Hold to dictate a task">🎤 Speak</button>
+      <button class="ghost" id="mic" title="Dictate a task">🎤 Speak</button>
+      <button class="ghost" id="vmode" title="When to read answers aloud">🔊 auto</button>
       <button class="ghost" id="newsess" title="Forget this conversation and drop the queue">New session</button>
       <button class="go" id="go">Dispatch</button>
     </div>
@@ -515,6 +516,53 @@ async function loadCatalog() {
    produces is fine because the server decodes through PyAV. */
 let REC = null, CHUNKS = [];
 
+/* Matches the chat doors: 'auto' speaks only when the task was dictated, which is the
+   rule a conversation already follows. Kept here because the page streams /api/dispatch
+   directly rather than going through chat_bridge, so it has to apply the rule itself. */
+let VMODE = localStorage.getItem("octopus.voice") || "auto";
+let DICTATED = false;                 // was the task in flight spoken rather than typed?
+
+function paintVmode() {
+  $("vmode").textContent = {auto: "🔊 auto", on: "🔊 always", off: "🔇 off"}[VMODE];
+  $("vmode").title = {
+    auto: "Reads answers aloud only when you dictated the task",
+    on: "Reads every answer aloud",
+    off: "Never reads answers aloud"
+  }[VMODE];
+}
+paintVmode();
+
+$("vmode").onclick = () => {
+  VMODE = {auto: "on", on: "off", off: "auto"}[VMODE];
+  localStorage.setItem("octopus.voice", VMODE);
+  paintVmode();
+};
+
+async function say(text) {
+  if (!text) return;
+  try {
+    const r = await fetch(API + "/api/voice/speak", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text})
+    });
+    if (!r.ok) return;
+    // Queued rather than overlapped: several agents finish close together, and three
+    // voices talking at once is worse than silence.
+    SPEAKQ.push(await r.blob());
+    drainSpeech();
+  } catch { /* speech is an extra; never let it break a run */ }
+}
+
+const SPEAKQ = [];
+let SPEAKING = false;
+function drainSpeech() {
+  if (SPEAKING || !SPEAKQ.length) return;
+  SPEAKING = true;
+  const audio = new Audio(URL.createObjectURL(SPEAKQ.shift()));
+  audio.onended = audio.onerror = () => { SPEAKING = false; drainSpeech(); };
+  audio.play().catch(() => { SPEAKING = false; });
+}
+
 $("results").addEventListener("click", async e => {
   const btn = e.target.closest(".say");
   if (!btn) return;
@@ -557,6 +605,7 @@ $("mic").onclick = async () => {
         // and a task worth running is worth glancing at first.
         $("task").value = d.text;
         $("task").focus();
+        DICTATED = true;          // answer in the medium the task arrived in
       } catch (err) {
         $("why").innerHTML = `<span class="fail">${esc(err.message)}</span>`;
       }
@@ -773,6 +822,7 @@ async function consume(r, rid) {
           dirty.delete(K(e.id));
           paint(K(e.id));          // final paint, including the scheduler's plan table
           layout();
+          if (VMODE === "on" || (VMODE === "auto" && DICTATED)) say(a.text);
         }
         else if (e.event === "error") {
           const a = A.get(K(e.id)); if (!a) continue;
@@ -822,6 +872,9 @@ $("go").onclick = () => {
   paintQueue();
   pump();
 };
+
+// Typing over a dictated task means it is no longer a dictated task.
+$("task").addEventListener("input", () => { if (!REC) DICTATED = false; });
 
 $("task").addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") $("go").click();

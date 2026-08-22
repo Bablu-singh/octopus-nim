@@ -191,11 +191,16 @@ reloading per utterance would cost more than speaking does.
   back as a real voice note (Opus, hold-to-play), not a file attachment.
 - **Discord** — voice message in, audio attachment out with an inline player.
 - **Browser** — a 🎤 button records a task and drops the transcript in the box for you to
-  check before dispatching, and every answer card gets a 🔊 to play it aloud.
+  check before dispatching. A 🔊 toggle picks when answers are read aloud (auto / always /
+  off), and every answer card also has its own 🔊 to replay it on demand.
 
 `/voice on|off|auto` per conversation. **auto** — the default — speaks only when you
 spoke, which is the rule a conversation already follows: answer in the medium you were
 addressed in.
+
+**It speaks; it does not sing.** Piper is a text-to-speech engine with no melody, pitch
+control or rhythm, so "sing me a song" produces lyrics read aloud in a flat voice. Singing
+needs a different class of model (RVC, so-vits-svc) and is not what this is.
 
 Audio is always sent *alongside* the text, never instead of it. Speech cannot be skimmed,
 searched or copied, so it is an addition to an answer rather than the answer.
