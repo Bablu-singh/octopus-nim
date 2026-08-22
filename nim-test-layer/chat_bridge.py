@@ -30,6 +30,7 @@ from typing import Awaitable, Callable
 import octopus
 import providers
 import routing
+import voice
 import web
 
 
@@ -61,9 +62,21 @@ class Transport:
     # progress; each run takes its own. Platforms without an editable status can hand back
     # the same object, since there is nothing to collide over.
     fork: Callable[[], "Transport"] | None = None
+    # Sends an audio clip. Present only where the platform can play one back; without it
+    # `voice_note` quietly does nothing and the text answer stands on its own.
+    audio: Callable[[bytes, str], Awaitable[bool]] | None = None
 
     def branch(self) -> "Transport":
         return self.fork() if self.fork else self
+
+    async def voice_note(self, text: str) -> bool:
+        """Speak an answer, if this platform can carry audio at all."""
+        if not self.audio:
+            return False
+        clip = await voice.speak(text)
+        if not clip:
+            return False
+        return await self.audio(clip, text[:60])
 
     def b(self, text: str) -> str:
         return f"{self.bold}{text}{self.bold}"
@@ -190,6 +203,11 @@ class Session:
     # can have more than one tangle going.
     live: dict = field(default_factory=dict)
     mode: str = "auto"
+    # 'auto' speaks only when the task itself arrived as speech, which is the rule people
+    # expect from a conversation: answer in the medium you were addressed in. 'on' always
+    # speaks, 'off' never does.
+    voice_mode: str = "auto"
+    spoke_last: bool = False        # was the task in flight dictated?
     last_cost: dict = field(default_factory=dict)
     started: float = field(default_factory=time.time)
 
@@ -291,6 +309,7 @@ one remembers what came before, so {t.i('now make that shorter')} works.
 /cost — what the last run spent
 /mode auto|local|nvidia|gemini — pin where work goes
 /web <query> — search the web, no model involved
+/voice on|off|auto — speak answers aloud
 /queue — what is running and what is waiting
 /history — what this session remembers
 /stop — cancel the run in progress
@@ -349,7 +368,7 @@ def _queue_view(sess: Session, t: Transport) -> str:
     for task in list(sess.live.values()):
         lines.append(f"▶ {t.b('running')}: {task[:80]}")
     if sess.queue:
-        for i, q in enumerate(sess.queue, 1):
+        for i, (q, _) in enumerate(sess.queue, 1):
             lines.append(f"{i}. {q[:90]}")
     elif not sess.live:
         lines.append("Nothing running, nothing queued.")
@@ -377,7 +396,7 @@ def _set_mode(sess: Session, arg: str, t: Transport) -> str:
             if arg != "auto" else f"Routing back to {t.b('auto')} — weighed per subtask.")
 
 
-async def _run_task(sess: Session, task: str, t: Transport) -> None:
+async def _run_task(sess: Session, task: str, t: Transport, spoken: bool = False) -> None:
     """Run one task to completion and remember what it produced.
 
     Progress is one line that gets rewritten — wave, who is working, then the summary —
@@ -448,6 +467,11 @@ async def _run_task(sess: Session, task: str, t: Transport) -> None:
                         body += "\n\n" + t.b("Sources") + "\n" + "\n".join(info["sources"])
                     await t.show(info.get("label", e["id"]), body,
                                  info.get("colour", ""), foot)
+                    # Spoken after the text, never instead of it. Audio cannot be
+                    # skimmed, searched or copied, so it is an addition to the answer
+                    # rather than the answer itself.
+                    if sess.voice_mode == "on" or (sess.voice_mode == "auto" and spoken):
+                        await t.voice_note(text)
 
             elif kind == "error":
                 info = agents_seen.get(e.get("id", ""), {})
@@ -494,8 +518,8 @@ async def _drain(sess: Session, t: Transport) -> None:
     try:
         while sess.queue or sess.live:
             while sess.queue and len(sess.live) < MAX_CONCURRENT:
-                task = sess.queue.popleft()
-                run = asyncio.create_task(_run_task(sess, task, t.branch()))
+                task, spoken = sess.queue.popleft()
+                run = asyncio.create_task(_run_task(sess, task, t.branch(), spoken))
                 sess.live[run] = task
                 run.add_done_callback(lambda r: sess.live.pop(r, None))
             if not sess.live:
@@ -524,8 +548,12 @@ def command_of(text: str) -> tuple[str, str]:
     return head.lower(), rest.strip()
 
 
-async def handle(convo: str, text: str, t: Transport) -> None:
-    """One inbound message, already authenticated by its transport."""
+async def handle(convo: str, text: str, t: Transport, spoken: bool = False) -> None:
+    """One inbound message, already authenticated by its transport.
+
+    `spoken` says the text arrived as a voice note rather than typed, which is what the
+    'auto' voice mode keys on.
+    """
     text = text.strip()
     if not text:
         return
@@ -545,6 +573,20 @@ async def handle(convo: str, text: str, t: Transport) -> None:
             await t.send(_set_mode(sess, arg, t))
         elif cmd == "web":
             await t.send(await _web(arg, t))
+        elif cmd == "voice":
+            want = (arg or "").strip().lower()
+            if want not in ("on", "off", "auto"):
+                ok, why = voice.available()
+                await t.send(
+                    f"{t.b('Voice')} is {t.b(sess.voice_mode)}. Use /voice on|off|auto.\n"
+                    f"auto = speak only when you send a voice note.\n"
+                    f"engine: {'ready' if ok else why}")
+            else:
+                sess.voice_mode = want
+                tail = {"on": " I'll speak every answer.",
+                        "auto": " I'll speak only when you do.",
+                        "off": " Text only."}[want]
+                await t.send(f"Voice {t.b(want)}.{tail}")
         elif cmd in ("queue", "q"):
             await t.send(_queue_view(sess, t))
         elif cmd in ("history", "context"):
@@ -587,7 +629,7 @@ async def handle(convo: str, text: str, t: Transport) -> None:
                      f"or /stop to clear it.")
         return
 
-    sess.queue.append(text)
+    sess.queue.append((text, spoken))
 
     # Counted after the append, and including anything the drainer has not picked up yet:
     # reading `live` alone reports 0 for tasks submitted faster than the loop starts them.

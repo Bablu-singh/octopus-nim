@@ -4,7 +4,7 @@ A local multi-agent console. Describe a task; it works out what kind of work it 
 splits it into as many agents as the task warrants, runs them in parallel, and decides
 for each one whether it should run **on your machine** or **on a hosted free tier**.
 
-Drive it from a browser, from **Discord**, or from **WhatsApp**.
+Drive it from a browser, from **Discord**, or from **WhatsApp** — by typing or by voice.
 
 **[Live demo →](https://bablu-singh.github.io/octopus-nim/)** — a recorded dispatch,
 replayed. GitHub Pages cannot run the Python backend, so the demo replays a real run
@@ -107,6 +107,16 @@ visible.
 **It will not read your machine.** Fetches are checked against the *resolved* address, so
 loopback, private ranges and the cloud metadata endpoint are refused even behind a public
 hostname.
+
+## Voice
+
+Speak a task, hear the answer. Piper for speech and faster-whisper for listening, both
+local, both on CPU, ~8x and ~6x realtime respectively — no key, no API, nothing leaves the
+machine. Send a WhatsApp voice note and get one back; same on Discord; in the browser a 🎤
+records and every answer has a 🔊.
+
+`/voice auto` (the default) speaks only when you spoke. Audio always accompanies the text
+rather than replacing it, since speech cannot be skimmed or copied.
 
 ## Drive it from your phone
 

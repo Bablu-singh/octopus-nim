@@ -113,6 +113,12 @@
   .queue .q .drop{margin-left:auto;cursor:pointer;color:var(--muted);opacity:.7}
   .queue .q .drop:hover{color:#ff9b8f;opacity:1}
   .memo{font-family:var(--mono);font-size:11px;color:var(--muted);opacity:.75;margin-top:6px}
+  button.ghost.rec{color:#ff9b8f;border-color:#ff9b8f;animation:pulse 1.2s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.55}}
+  /* Play an answer aloud. Sits in the card header next to the model name. */
+  .card h3 .say{margin-left:6px;cursor:pointer;color:var(--muted);font-size:12px;
+    background:none;border:0;padding:0;transition:color .2s}
+  .card h3 .say:hover{color:var(--glow)}
   /* One tangle per task. Concurrent runs each get their own group, so two pools on screen
      at once stay legible instead of interleaving their cards. */
   .tangle{border:1px solid var(--ridge);border-radius:14px;padding:14px;margin-bottom:16px;
@@ -258,6 +264,7 @@
     <textarea id="task" placeholder="Describe the task. Octopus works out what kind of work it is and how many agents it needs.">Migrate our billing monolith to microservices: assess the risks, write the extraction code for the invoice module, plan the cutover, and draft the customer announcement.</textarea>
     <div class="bar">
       <div class="hint" id="hint">it reads the task and sizes the swarm itself — nothing to pick</div>
+      <button class="ghost" id="mic" title="Hold to dictate a task">🎤 Speak</button>
       <button class="ghost" id="newsess" title="Forget this conversation and drop the queue">New session</button>
       <button class="go" id="go">Dispatch</button>
     </div>
@@ -451,6 +458,7 @@ function card(a) {
       ${a.provider ? `<span class="prov" data-p="${esc(a.provider)}">${esc(a.provider)}</span>` : ""}
       <span class="mdl">${esc(bare(a.model) || "—")}</span>
       <span class="ms" id="ms-${a.key}"></span>
+      <button class="say" data-key="${a.key}" title="Read this answer aloud">🔊</button>
       ${a.route_why ? `<span class="rwhy">routed: ${esc(a.route_why)}</span>` : ""}
     </h3><div class="out" id="out-${a.key}"></div>`;
   // Into its own tangle, not the shared results list: with two runs going at once a
@@ -500,6 +508,67 @@ async function loadCatalog() {
     $("stat").textContent = err.message;
   }
 }
+
+/* ---------- voice ----------
+   Speech both ways, served by the local Piper and Whisper models. The mic uses the
+   browser's own MediaRecorder, so capture costs no dependency; whatever container it
+   produces is fine because the server decodes through PyAV. */
+let REC = null, CHUNKS = [];
+
+$("results").addEventListener("click", async e => {
+  const btn = e.target.closest(".say");
+  if (!btn) return;
+  const a = A.get(btn.dataset.key);
+  if (!a || !a.text) return;
+  btn.textContent = "…";
+  try {
+    const r = await fetch(API + "/api/voice/speak", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text: a.text})
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const audio = new Audio(URL.createObjectURL(await r.blob()));
+    audio.play();
+    btn.textContent = "🔊";
+  } catch (err) {
+    btn.textContent = "⚠";
+    btn.title = err.message;
+  }
+});
+
+$("mic").onclick = async () => {
+  if (REC && REC.state === "recording") { REC.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    CHUNKS = [];
+    REC = new MediaRecorder(stream);
+    REC.ondataavailable = ev => CHUNKS.push(ev.data);
+    REC.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      $("mic").classList.remove("rec");
+      $("mic").textContent = "⏳ …";
+      const form = new FormData();
+      form.append("audio", new Blob(CHUNKS), "speech.webm");
+      try {
+        const r = await fetch(API + "/api/voice/listen", {method: "POST", body: form});
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        // Into the box rather than straight to dispatch: transcription is not perfect,
+        // and a task worth running is worth glancing at first.
+        $("task").value = d.text;
+        $("task").focus();
+      } catch (err) {
+        $("why").innerHTML = `<span class="fail">${esc(err.message)}</span>`;
+      }
+      $("mic").textContent = "🎤 Speak";
+    };
+    REC.start();
+    $("mic").classList.add("rec");
+    $("mic").textContent = "⏹ Stop";
+  } catch (err) {
+    $("why").innerHTML = `<span class="fail">microphone unavailable: ${esc(err.message)}</span>`;
+  }
+};
 
 /* ---------- session ----------
    The browser gets the same session store as the Discord and WhatsApp doors, keyed by an

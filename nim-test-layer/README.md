@@ -172,6 +172,43 @@ are all blocked:
 public internet only — this would be reading your own machine.
 ```
 
+## Voice
+
+Speak to it, and hear the answers. Both halves run locally on CPU — no key, no API,
+nothing leaves the machine, the same constraint the models follow.
+
+| | Engine | Size | Speed on this CPU |
+|---|---|---|---|
+| Speech | Piper (`en_US-lessac-medium`) | 63 MB | ~8x realtime |
+| Listening | faster-whisper (`base.en`, int8) | ~150 MB | ~6x realtime |
+
+Models download on first use into `voices/` (gitignored) and are then kept in memory —
+reloading per utterance would cost more than speaking does.
+
+**Where it works**
+
+- **WhatsApp** — send a voice note, it is transcribed and dispatched; the answer comes
+  back as a real voice note (Opus, hold-to-play), not a file attachment.
+- **Discord** — voice message in, audio attachment out with an inline player.
+- **Browser** — a 🎤 button records a task and drops the transcript in the box for you to
+  check before dispatching, and every answer card gets a 🔊 to play it aloud.
+
+`/voice on|off|auto` per conversation. **auto** — the default — speaks only when you
+spoke, which is the rule a conversation already follows: answer in the medium you were
+addressed in.
+
+Audio is always sent *alongside* the text, never instead of it. Speech cannot be skimmed,
+searched or copied, so it is an addition to an answer rather than the answer.
+
+Markdown is rewritten before it is spoken: code blocks are named rather than read, links
+become "link" instead of a minute of alphabet, and formatting characters are dropped —
+read literally, Markdown is unbearable. Long answers are capped on a sentence boundary
+with a note that the rest is in the text.
+
+```bash
+curl -s localhost:8000/api/voice/speak -H 'Content-Type: application/json'   -d '{"text":"Four agents dispatched."}' -o answer.wav
+```
+
 ## Sessions: a queue and a memory
 
 A conversation is not a series of unrelated requests, so it is not treated as one.
@@ -413,6 +450,9 @@ for streaming it is the gap between chunks), and `NIM_PROBE_TIMEOUT`.
 | GET/POST | `/api/whatsapp` | Meta webhook: handshake, then inbound messages |
 | GET | `/api/whatsapp/health` | Is WhatsApp wired up? Never returns the token or secret |
 | GET | `/api/discord/health` | Is the bot connected? Never returns the token |
+| POST | `/api/voice/speak` | Text in, WAV out |
+| POST | `/api/voice/listen` | Audio in, text out (any container the browser records) |
+| GET | `/api/voice/health` | Which models, loaded or not |
 | GET | `/api/session/{id}` | What a session remembers, and what it is doing |
 | POST | `/api/session/{id}/new` | End a session: forget the thread, drop the queue |
 | GET | `/api/models` | Every model ID one provider lists (`?provider=local`) |

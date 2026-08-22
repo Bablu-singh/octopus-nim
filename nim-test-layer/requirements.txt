@@ -12,3 +12,10 @@ discord.py>=2.4
 # Optional: QR-scan WhatsApp (ENABLE_WHATSAPP_QR=1). Unofficial client - violates
 # WhatsApp ToS and risks the phone number being banned. See wa_qr.py before enabling.
 neonize>=0.4
+
+# Optional: voice in and out (ENABLE_VOICE=1). Both run locally on CPU - Piper is ~8x
+# realtime for speech, faster-whisper ~6x for transcription, no GPU and no API.
+# python-multipart is what lets the browser POST a recording.
+piper-tts>=1.7
+faster-whisper>=1.1
+python-multipart>=0.0.9

@@ -16,9 +16,9 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response as RawResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # providers loads .env itself, at import time, before it reads the base URLs and
@@ -30,6 +30,7 @@ import providers
 import routing
 import chat_bridge
 import wa_bridge
+import voice
 import wa_qr
 import web
 import whatsapp
@@ -321,6 +322,42 @@ def wa_qr_image() -> FileResponse:
 async def wa_qr_test() -> dict:
     """Send one diagnostic message to the allowed number. Proves both directions."""
     return await wa_qr.send_test()
+
+
+class SpeakRequest(BaseModel):
+    text: str = Field(min_length=1)
+
+
+@app.post("/api/voice/speak")
+async def api_speak(req: SpeakRequest):
+    """Text in, WAV out. Used by the page's play buttons."""
+    clip = await voice.speak(req.text)
+    if not clip:
+        ok, why = voice.available()
+        raise HTTPException(status_code=503, detail=why if not ok else "synthesis failed")
+    return RawResponse(content=clip, media_type="audio/wav",
+                       headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/voice/listen")
+async def api_listen(audio: UploadFile = File(...)) -> dict:
+    """Audio in, text out. Whatever the browser's MediaRecorder produced is fine.
+
+    No format negotiation: faster-whisper decodes through PyAV, which handles the webm,
+    ogg and mp4 containers browsers actually record into.
+    """
+    data = await audio.read()
+    text = await voice.listen(data)
+    if not text:
+        ok, why = voice.available()
+        raise HTTPException(status_code=503 if not ok else 422,
+                            detail=why if not ok else "nothing recognisable in that audio")
+    return {"text": text, "bytes": len(data)}
+
+
+@app.get("/api/voice/health")
+async def api_voice_health() -> dict:
+    return voice.status()
 
 
 @app.get("/api/discord/health")

@@ -41,6 +41,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import chat_bridge
+import voice
 
 HERE = Path(__file__).parent
 
@@ -185,10 +186,33 @@ def _transport(chat_jid) -> chat_bridge.Transport:
                 return False
         return True
 
+    async def audio(clip: bytes, caption: str = "") -> bool:
+        """Send a spoken answer as a real voice note, not a file attachment.
+
+        WhatsApp will accept a WAV as a document but only renders a playable voice note
+        from Opus, and a note you can hold-to-play is the entire point on a phone.
+        """
+        if _client is None:
+            return False
+        ogg = voice.to_ogg(clip)
+        if not ogg:
+            return False
+        loop = asyncio.get_running_loop()
+        try:
+            msg = await loop.run_in_executor(
+                None, lambda: _client.build_audio_message(ogg, ptt=True))
+            resp = await loop.run_in_executor(
+                None, _client.send_message, chat_jid, msg)
+            _remember_sent(str(getattr(resp, "ID", "") or ""))
+            return True
+        except Exception as err:
+            print(f"[wa-qr] voice note failed: {type(err).__name__}: {err}", flush=True)
+            return False
+
     # WhatsApp has no embeds and no editable messages, so it takes the plain-text
     # fallbacks in chat_bridge — the same ones the Cloud API door uses.
     return chat_bridge.Transport(name="whatsapp-qr", limit=MAX_BODY, send=send,
-                                 bold="*", italic="_")
+                                 bold="*", italic="_", audio=audio)
 
 
 def _render_qr(code: str) -> None:
@@ -277,6 +301,25 @@ def _run_client() -> None:
             body = (getattr(msg, "conversation", "")
                     or getattr(getattr(msg, "extendedTextMessage", None), "text", "")
                     or "").strip()
+
+            # A voice note is a task. WhatsApp sends them as audioMessage with ptt set;
+            # they are encrypted, so the client downloads and decrypts before it is
+            # anything we can transcribe.
+            spoken = False
+            if not body and msg.HasField("audioMessage"):
+                try:
+                    blob = _client.download_any(msg)
+                except Exception as err:
+                    print(f"[wa-qr]   voice download failed: {err}", flush=True)
+                    blob = b""
+                if blob:
+                    heard = asyncio.run_coroutine_threadsafe(
+                        voice.listen(blob), _loop).result(timeout=180) if _loop else ""
+                    if heard:
+                        body, spoken = heard, True
+                        if DEBUG:
+                            print(f"[wa-qr]   transcribed {len(blob)} bytes: "
+                                  f"{heard[:80]!r}", flush=True)
 
             if DEBUG:
                 mode = getattr(src, "AddressingMode", "")

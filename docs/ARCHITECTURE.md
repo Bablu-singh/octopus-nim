@@ -39,6 +39,7 @@ flowchart TB
         ROUTE["routing.py<br/><i>how heavy is this subtask?</i>"]
         AG["agents.py<br/><i>6 role templates, model preferences</i>"]
         WEB["web.py<br/><i>search · fetch · untrusted-content fencing</i>"]
+        VOX["voice.py<br/><i>Piper speech · Whisper ears · local, CPU</i>"]
     end
 
     subgraph transport["Provider layer"]
@@ -60,6 +61,7 @@ flowchart TB
     OCT --> ROUTE
     OCT --> AG
     OCT --> WEB
+    BR --> VOX
     OCT --> PROV
     WEB --> INET["the live web<br/><i>keyless search + fetch</i>"]
     PROV --> LOCAL
@@ -324,6 +326,33 @@ Three defaults are deliberately closed rather than open: no app secret means eve
 delivery is refused instead of trusted, an empty allowlist disables the integration
 instead of accepting everyone, and an unknown sender gets silence instead of an error
 that would confirm something is listening.
+
+---
+
+## Voice
+
+`voice.py` is the same shape as everything else here: local, free, no key, and lazily
+loaded because most runs never use it. Piper synthesises about eight times faster than
+realtime on this CPU and faster-whisper transcribes about six times faster, so neither
+needs a GPU and neither is the slow part of a run.
+
+Three decisions worth recording:
+
+- **Audio accompanies text, never replaces it.** Speech cannot be skimmed, searched or
+  copied. A spoken answer is an addition for when your hands are busy, not a substitute
+  for the thing you might want to paste into an editor.
+- **Markdown is rewritten before it is spoken.** Read literally it is unbearable — code
+  blocks are unlistenable, URLs are a minute of alphabet, asterisks are read aloud. Code
+  and links are named rather than read, and long answers are cut on a sentence boundary
+  with a note that the rest is in the text.
+- **'auto' is the default voice mode**, meaning it speaks only when spoken to. That is
+  the rule conversations already follow, and it means voice costs nothing for people who
+  type.
+
+Transports declare an `audio` surface the same way they declare `card` and `status`;
+platforms without one simply never speak. WhatsApp needs one extra step — it renders a
+playable voice note only from Opus, so WAV is transcoded through PyAV, which arrives with
+faster-whisper and therefore costs no new dependency.
 
 ---
 

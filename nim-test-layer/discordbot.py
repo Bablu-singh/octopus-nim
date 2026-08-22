@@ -28,6 +28,7 @@ import asyncio
 import os
 
 import chat_bridge
+import voice
 
 ENABLED = os.getenv("ENABLE_DISCORD", "0") == "1"
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
@@ -126,9 +127,21 @@ def _transport(channel) -> chat_bridge.Transport:
             print(f"[discord] card failed: {type(err).__name__}: {err}", flush=True)
             return await send(f"**{title}**\n\n{body}")
 
+    async def audio(clip: bytes, caption: str = "") -> bool:
+        """Attach a spoken answer. Discord renders a WAV with an inline player."""
+        try:
+            import io
+            await channel.send(
+                content=f"🔊 {caption[:80]}" if caption else None,
+                file=discord.File(io.BytesIO(clip), filename="answer.wav"))
+            return True
+        except Exception as err:
+            print(f"[discord] audio failed: {type(err).__name__}: {err}", flush=True)
+            return False
+
     # Discord spells bold with two asterisks and italic with one; WhatsApp uses one and
     # an underscore. Getting this wrong shows up as literal asterisks in the chat.
-    return chat_bridge.Transport(name="discord", limit=LIMIT, send=send,
+    return chat_bridge.Transport(name="discord", limit=LIMIT, send=send, audio=audio,
                                  bold="**", italic="*",
                                  card=card, status=status, card_limit=EMBED_LIMIT,
                                  # A fresh transport per concurrent run: `state` above
@@ -237,12 +250,29 @@ async def _build():
         if CHANNELS and str(message.channel.id) not in CHANNELS:
             return
         text = (message.content or "").strip()
+
+        # A voice message is a task too. Discord sends them as ordinary attachments, so
+        # anything audio-shaped is transcribed and used as the message body — and the
+        # answer comes back spoken, because that is the medium it arrived in.
+        spoken = False
+        for att in message.attachments:
+            if (att.content_type or "").startswith("audio") or                     att.filename.lower().endswith((".ogg", ".mp3", ".m4a", ".wav", ".webm")):
+                async with message.channel.typing():
+                    heard = await voice.listen(await att.read())
+                if heard:
+                    text, spoken = heard, True
+                    await message.channel.send(f"🎤 heard: *{heard[:300]}*")
+                else:
+                    await message.channel.send("🎤 I could not make that out.")
+                    return
+                break
+
         if not text:
             return
         # Keyed by channel so a DM and a server channel are separate conversations with
         # separate routing pins and separate in-flight runs.
         convo = f"discord:{message.channel.id}"
-        await chat_bridge.handle(convo, text, _transport(message.channel))
+        await chat_bridge.handle(convo, text, _transport(message.channel), spoken=spoken)
 
     return client
 
