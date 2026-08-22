@@ -230,57 +230,96 @@ TERMINAL = ".!?:;,।॥"
 FULL_STOPS = ".!?।॥"
 
 
+def _render(piece: str, lang: str):
+    """One sentence to (samples, rate). The single place either engine is actually called."""
+    import numpy as np
+    if ENGINE == "kokoro":
+        k = _load_kokoro()
+        samples, rate = k.create(piece, voice=KOKORO_HI if lang == "hi" else KOKORO_EN,
+                                 lang="hi" if lang == "hi" else "en-us", speed=SPEED)
+        return np.asarray(samples, dtype="float32"), rate
+    voice_obj = _load_piper()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        voice_obj.synthesize_wav(piece, w)
+    with wave.open(io.BytesIO(buf.getvalue())) as r:
+        rate = r.getframerate()
+        raw = np.frombuffer(r.readframes(r.getnframes()), dtype="<i2")
+    return raw.astype("float32") / 32767.0, rate
+
+
+def _gap_after(piece: str) -> float:
+    """A longer breath after a full stop than after a colon or a clause end."""
+    return SENTENCE_PAUSE if piece.rstrip()[-1:] in FULL_STOPS else CLAUSE_PAUSE
+
+
 def _synth(text: str) -> bytes:
-    """Speak the text, breathing between sentences.
+    """Speak the whole thing as one clip, breathing between sentences.
 
     Kokoro takes `sentence_pause` and `clause_pause` arguments and, in this build,
-    ignores both: synthesising the same text with 0.0 and 1.0 produces byte-identical
-    length. They only apply in `continuous` mode, which needs a model export that reports
-    per-phoneme durations — not the published one. Piper has no pause control at all.
-
-    So the pause is inserted here instead. Each sentence is synthesised on its own and
-    joined with real silence, which is both more reliable than the parameter and more
-    controllable: the gap is exactly as long as it is set to be. It costs one model call
-    per sentence, and those are fractions of a second.
+    ignores both: the same text at 0.0 and at 1.0 produces identical audio, because they
+    only apply in a `continuous` mode needing a model export that reports per-phoneme
+    durations. Piper has no pause control at all. So the silence is inserted here.
     """
+    import numpy as np
     lang = detect_lang(text)
     pieces = [s for s in SENTENCE_SPLIT.split(text) if s.strip()]
     if not pieces:
         return b""
-
-    if ENGINE == "kokoro":
-        import numpy as np
-        k = _load_kokoro()
-        voice_name = KOKORO_HI if lang == "hi" else KOKORO_EN
-        chunks, rate = [], 24000
-        gap = None
-        for i, piece in enumerate(chunks_iter := pieces):
-            samples, rate = k.create(piece, voice=voice_name,
-                                     lang="hi" if lang == "hi" else "en-us",
-                                     speed=SPEED)
-            chunks.append(np.asarray(samples, dtype="float32"))
-            if i < len(chunks_iter) - 1:
-                # A longer breath after a full stop than after a colon or a clause end.
-                pause = SENTENCE_PAUSE if piece.rstrip()[-1:] in FULL_STOPS else CLAUSE_PAUSE
-                chunks.append(np.zeros(int(rate * pause), dtype="float32"))
-        return _pcm_wav(np.concatenate(chunks), rate)
-
-    # piper: same idea, stitched through the wave module since it writes WAV directly.
-    import numpy as np
-    voice_obj = _load_piper()
-    chunks, rate = [], 22050
+    chunks, rate = [], 24000
     for i, piece in enumerate(pieces):
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            voice_obj.synthesize_wav(piece, w)
-        with wave.open(io.BytesIO(buf.getvalue())) as r:
-            rate = r.getframerate()
-            raw = np.frombuffer(r.readframes(r.getnframes()), dtype="<i2")
-        chunks.append(raw.astype("float32") / 32767.0)
+        samples, rate = _render(piece, lang)
+        chunks.append(samples)
         if i < len(pieces) - 1:
-            pause = SENTENCE_PAUSE if piece.rstrip()[-1:] in FULL_STOPS else CLAUSE_PAUSE
-            chunks.append(np.zeros(int(rate * pause), dtype="float32"))
+            chunks.append(np.zeros(int(rate * _gap_after(piece)), dtype="float32"))
     return _pcm_wav(np.concatenate(chunks), rate)
+
+
+async def speak_stream(text: str):
+    """Yield one WAV per sentence, as soon as each is ready.
+
+    This is the difference between hearing something in under a second and waiting for the
+    whole answer. Synthesising a seven-sentence answer takes about seven seconds and the
+    first sentence takes under one, so returning the finished article means seven seconds
+    of silence for audio that then plays for twenty. The caller plays each clip as it
+    arrives and the queue stays ahead of the ear.
+    """
+    ok, _ = available()
+    if not ok:
+        return
+    body = speakable(text)
+    lang = detect_lang(body)
+    pieces = [s for s in SENTENCE_SPLIT.split(body) if s.strip()]
+    loop = asyncio.get_running_loop()
+    import numpy as np
+
+    for i, piece in enumerate(pieces):
+        try:
+            samples, rate = await loop.run_in_executor(None, _render, piece, lang)
+        except Exception as err:
+            _state["tts_error"] = f"{type(err).__name__}: {err}"
+            print(f"[voice] synthesis failed: {err}", flush=True)
+            return
+        if i < len(pieces) - 1:
+            samples = np.concatenate(
+                [samples, np.zeros(int(rate * _gap_after(piece)), dtype="float32")])
+        yield _pcm_wav(samples, rate)
+
+
+def warm() -> None:
+    """Load the models now so the first spoken answer does not pay for it.
+
+    Loading Kokoro costs about five seconds. Paying that during startup, while nobody is
+    listening, is free; paying it on the first thing anyone asks to hear is the difference
+    between voice feeling instant and feeling broken.
+    """
+    ok, _ = available()
+    if not ok:
+        return
+    try:
+        _render("ready.", "en")
+    except Exception as err:
+        print(f"[voice] warm failed: {type(err).__name__}: {err}", flush=True)
 
 
 async def speak(text: str) -> bytes:

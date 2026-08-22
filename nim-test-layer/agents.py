@@ -122,9 +122,10 @@ TENTACLES: list[Tentacle] = [
                     # quota, and on these agents being throttled costs far more than the
                     # quality difference is worth.
                     "gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash",
-                    # Local. Only reachable when the pool is scoped to the local provider,
-                    # so their position after the hosted names costs nothing.
-                    "qwen2.5", "llama3.2", "mistral", "phi"],
+                    # Local. aya-expanse first: it covers 23 languages properly, where
+                    # qwen2.5 writes decent English and thin Hindi. Only reachable when
+                    # the pool is scoped to local, so this ordering costs nothing hosted.
+                    "aya-expanse", "aya", "gemma2", "qwen2.5", "llama3.2", "mistral", "phi"],
         fallback_families=["chat", "reasoning"],
         system=("You are a writing specialist. Produce finished prose, not an outline of prose. "
                 "Match the register the request implies. No preamble, no 'here is'; open with the "
@@ -211,8 +212,9 @@ TENTACLES: list[Tentacle] = [
                     "llama-3.3-nemotron-super-49b", "gpt-oss-120b", "nemotron-3-super",
                     "nemotron-70b", "magistral", "llama-3.3-70b",
                     "gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash",
-                    # Local: the 7B first — analysis is where the 3B's ceiling shows.
-                    "qwen2.5", "llama3.2", "mistral"],
+                    # Local: the 7B first — analysis is where the 3B's ceiling shows, and
+                    # aya ahead of it for anything not in English.
+                    "aya-expanse", "qwen2.5", "gemma2", "llama3.2", "mistral"],
         fallback_families=["reasoning", "chat"],
         system=("You are an analyst. Lead with the conclusion, then the reasoning that supports it. "
                 "Quantify where the input allows and say plainly where it does not. Name the "
@@ -233,8 +235,9 @@ TENTACLES: list[Tentacle] = [
                     "nemotron-3-ultra", "llama-3.1-70b", "llama-3.1-8b",
                     "gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash",
                     # Local: this role reads several thousand characters of fetched page
-                    # before it answers, so the 7B rather than the 3B.
-                    "qwen2.5", "mistral", "llama3.2"],
+                    # before it answers, so the 7B rather than the 3B — and aya first,
+                    # since a fetched page is as likely to be Hindi as English.
+                    "aya-expanse", "qwen2.5", "gemma2", "mistral", "llama3.2"],
         fallback_families=["chat", "reasoning"],
         system=("You are a research specialist. You are given excerpts from web pages that "
                 "were fetched moments ago. Answer strictly from them: quote figures as they "

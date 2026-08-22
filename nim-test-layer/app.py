@@ -11,6 +11,7 @@ endpoint here works with no key and no network.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 from contextlib import asynccontextmanager
@@ -66,6 +67,18 @@ async def lifespan(_: FastAPI):
 
     task = asyncio.create_task(warm())
 
+    # Load the speech models now rather than on the first thing anyone asks to hear.
+    # Kokoro takes about five seconds to load; paying that while nobody is listening is
+    # free, paying it on the first answer is the difference between instant and broken.
+    async def warm_voice() -> None:
+        ok, why = voice.available()
+        say(f"voice: {'warming' if ok else 'off'} — {why}")
+        if ok:
+            await asyncio.get_running_loop().run_in_executor(None, voice.warm)
+            say("voice: models ready")
+
+    voice_task = asyncio.create_task(warm_voice())
+
     # The Discord bot lives in this process and this event loop. Its gateway is an
     # outbound WebSocket, so unlike the WhatsApp webhook it needs no public URL, no
     # tunnel and no inbound port — which is why it is the front door worth reaching for.
@@ -85,6 +98,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         task.cancel()
+        voice_task.cancel()
         await discordbot.shutdown()
 
 
@@ -337,6 +351,29 @@ async def api_speak(req: SpeakRequest):
         raise HTTPException(status_code=503, detail=why if not ok else "synthesis failed")
     return RawResponse(content=clip, media_type="audio/wav",
                        headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/voice/speak/stream")
+async def api_speak_stream(req: SpeakRequest):
+    """One clip per sentence, streamed as each is ready.
+
+    Waiting for a whole answer to synthesise means several seconds of silence before the
+    first word; a sentence takes under one. The client plays them in order as they land.
+    Base64 over SSE because the browser already speaks that protocol here and binary
+    multipart would need a second parser for no gain.
+    """
+    async def gen():
+        try:
+            async for clip in voice.speak_stream(req.text):
+                yield "data: " + base64.b64encode(clip).decode() + "\n\n"
+        except Exception as err:                      # never leave the stream hanging
+            print(f"[voice] stream failed: {type(err).__name__}: {err}", flush=True)
+        yield "data: [DONE]\n\n"
+
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/voice/listen")

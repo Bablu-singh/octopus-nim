@@ -101,6 +101,14 @@ Every subtask is weighed before a model is bound to it — role baseline, plus d
 | Parallelism | 2 (`OCTOPUS_LOCAL_PARALLEL`) | 6 (`OCTOPUS_MAX_PARALLEL`) | 6 |
 | Gets | light work | heavy work, image generation, planning | heavy work, planning |
 
+**Language is a routing signal too.** The depth and brevity cues are matched in Devanagari
+as well as ASCII — without that, a Hindi request for a *"विस्तृत, उत्पादन-योग्य"* plan
+matched no cues at all and scored at its role baseline, so **every Hindi task went local
+regardless of complexity**. On top of that, non-Latin script adds `OCTOPUS_NON_LATIN_BIAS`
+(0.30) because a local 7B writes fluent English and thin Hindi — that is a capability
+difference, not a size one. Locally, `aya-expanse` is preferred over `qwen2.5` for prose,
+analysis and research for the same reason.
+
 Order within a branch is not hardcoded: each provider declares `prefers` (`small`/`large`)
 and `priority` in `providers.py`, and the router reads that — so adding a key adds a
 destination without touching `routing.py`.

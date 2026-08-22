@@ -780,16 +780,33 @@ $("vmode").onclick = () => {
 
 async function say(text) {
   if (!text) return;
+  // Streamed, one clip per sentence. Waiting for a whole answer to synthesise is several
+  // seconds of silence; the first sentence takes well under one, and playback keeps ahead
+  // of synthesis from there.
   try {
-    const r = await fetch(API + "/api/voice/speak", {
+    const r = await fetch(API + "/api/voice/speak/stream", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({text})
     });
-    if (!r.ok) return;
-    // Queued rather than overlapped: several agents finish close together, and three
-    // voices talking at once is worse than silence.
-    SPEAKQ.push(await r.blob());
-    drainSpeech();
+    if (!r.ok || !r.body) return;
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split("\n"); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        const bin = atob(payload);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        SPEAKQ.push(new Blob([bytes], {type: "audio/wav"}));
+        drainSpeech();
+      }
+    }
   } catch { /* speech is an extra; never let it break a run */ }
 }
 

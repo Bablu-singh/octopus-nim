@@ -33,6 +33,9 @@ import providers
 # prose and everyday analysis stay local — that is the common case and the one where
 # local latency actually beats the round trip — while anything asking for depth leaves.
 THRESHOLD = float(os.getenv("OCTOPUS_ROUTE_THRESHOLD", "0.55"))
+# How much a non-Latin script pushes work towards a hosted model. Enough to carry an
+# ordinary request over the line on its own, since the gap in quality is that large.
+NON_LATIN_BIAS = float(os.getenv("OCTOPUS_NON_LATIN_BIAS", "0.30"))
 
 # 'auto' is the point of this module. Any registered provider name also works as a pin,
 # for working offline on a plane, or for comparing two of them on the same task.
@@ -70,6 +73,22 @@ LIGHT = re.compile(
 )
 
 
+# Scripts that a small local model handles noticeably worse than a hosted one. This is a
+# capability signal, not a size signal: qwen2.5:7b writes decent English and thin Hindi,
+# while Gemini is strong in both. Weighing only the words meant every Devanagari task
+# scored at its role baseline — the cue regexes below are ASCII, so a Hindi request for a
+# "विस्तृत, उत्पादन-योग्य" plan matched nothing at all and went local by default.
+NON_LATIN = re.compile(r"[ऀ-ॿ؀-ۿ一-鿿ঀ-৿]")
+
+# The same depth and brevity cues in Devanagari, so a Hindi task is weighed on what it
+# asks for rather than only on who is asking.
+HEAVY_HI = re.compile(
+    "विस्तृत|विस्तार|संपूर्ण|पूर्ण|व्यापक|गहन|उत्पादन|आर्किटेक्चर|"
+    "माइग्रेशन|रणनीति|योजना बनाएं|सुरक्षा|समीक्षा|तुलना|विश्लेषण|चरण.दर.चरण")
+LIGHT_HI = re.compile(
+    "संक्षेप|संक्षिप्त|छोटा|छोटी|जल्दी|एक पंक्ति|सरल|सूची|नाम बताएं|क्या है|अर्थ")
+
+
 def weigh(subtask: str, role: str) -> tuple[float, str]:
     """Score a subtask from 0 (trivial) to 1 (heavyweight), with the reason why.
 
@@ -81,8 +100,8 @@ def weigh(subtask: str, role: str) -> tuple[float, str]:
     score = ROLE_WEIGHT.get(role, 0.4)
     reasons: list[str] = []
 
-    heavy_hits = len(HEAVY.findall(text))
-    light_hits = len(LIGHT.findall(text))
+    heavy_hits = len(HEAVY.findall(text)) + len(HEAVY_HI.findall(text))
+    light_hits = len(LIGHT.findall(text)) + len(LIGHT_HI.findall(text))
 
     if heavy_hits:
         score += min(0.15 * heavy_hits, 0.40)
@@ -109,6 +128,13 @@ def weigh(subtask: str, role: str) -> tuple[float, str]:
     if bullets >= 3:
         score += 0.15
         reasons.append(f"{bullets} listed requirements")
+
+    # Language capability, weighed last because it is about who can do the work at all
+    # rather than how much work it is. A local 7B produces thin, ungrammatical Hindi where
+    # a hosted model is fluent, so non-Latin script leans the decision outward.
+    if NON_LATIN.search(subtask or ""):
+        score += NON_LATIN_BIAS
+        reasons.append("non-Latin script — local models are weaker here")
 
     score = max(0.0, min(1.0, score))
     if not reasons:
