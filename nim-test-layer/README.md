@@ -250,9 +250,13 @@ reloading per utterance would cost more than speaking does.
   check before dispatching. A 🔊 toggle picks when answers are read aloud (auto / always /
   off), and every answer card also has its own 🔊 to replay it on demand.
 
-`/voice on|off|auto` per conversation. **auto** — the default — speaks only when you
-spoke, which is the rule a conversation already follows: answer in the medium you were
-addressed in.
+`/voice on|off|auto` per conversation. On Discord and WhatsApp the default is **on** —
+every answer arrives as text plus a voice note, because a phone is where hands-free
+actually matters. `auto` speaks only when you sent a voice note; `off` silences it. Change
+the default with `CHAT_VOICE_MODE`.
+
+The browser defaults to **auto** instead, since you are already looking at the screen
+there; its 🔊 toggle cycles auto / always / off.
 
 **It breathes.** Each sentence is synthesised on its own and joined with real silence —
 half a second after a full stop, a fifth after a colon — because Kokoro's own

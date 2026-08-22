@@ -175,6 +175,13 @@ MAX_QUEUE = int(os.getenv("CHAT_MAX_QUEUE", "12"))
 # unbounded because every agent in every run competes for the same provider rate limits,
 # and past a point more concurrency just buys more 429s.
 MAX_CONCURRENT = int(os.getenv("CHAT_MAX_CONCURRENT", "3"))
+# Whether answers are spoken, before anyone touches /voice.
+#   on    speak every answer — the default on the chat doors, because a phone is where
+#         hands-free actually matters and "why am I not getting voice notes" is a worse
+#         first experience than one audio file too many
+#   auto  speak only when the task arrived as a voice note
+#   off   never speak
+DEFAULT_VOICE = os.getenv("CHAT_VOICE_MODE", "on").strip().lower()
 # How many past turns a new task is told about. Enough to follow a thread, few enough
 # that the planner is not reading an essay before it starts.
 HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
@@ -203,10 +210,10 @@ class Session:
     # can have more than one tangle going.
     live: dict = field(default_factory=dict)
     mode: str = "auto"
-    # 'auto' speaks only when the task itself arrived as speech, which is the rule people
-    # expect from a conversation: answer in the medium you were addressed in. 'on' always
-    # speaks, 'off' never does.
-    voice_mode: str = "auto"
+    # See DEFAULT_VOICE. 'auto' answers in the medium it was addressed in; 'on' always
+    # speaks; 'off' never does. Per conversation, so one noisy channel can be silenced
+    # without changing the others.
+    voice_mode: str = field(default_factory=lambda: DEFAULT_VOICE)
     spoke_last: bool = False        # was the task in flight dictated?
     last_cost: dict = field(default_factory=dict)
     started: float = field(default_factory=time.time)
