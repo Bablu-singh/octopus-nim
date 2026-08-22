@@ -131,11 +131,23 @@ def speakable(text: str) -> str:
         kept.append(line)
     text = " ".join(kept)
     if len(text) > MAX_SPEAK_CHARS:
-        # Cut on a sentence boundary if there is one nearby, so it does not stop mid-word.
+        # Cut on a sentence boundary, in whatever script the text is actually in. Looking
+        # only for ". " finds nothing in Devanagari — Hindi ends sentences with a danda —
+        # so every long Hindi answer was hard-cut mid-word instead, which is exactly what
+        # "it skips the words" sounds like.
         cut = text[:MAX_SPEAK_CHARS]
-        dot = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
-        text = (cut[:dot + 1] if dot > MAX_SPEAK_CHARS * 0.6 else cut) + " … "
-        text += "That is the short version; the rest is in the text."
+        stop = max(cut.rfind(mark + " ") for mark in FULL_STOPS)
+        stop = max(stop, max(cut.rfind(mark) for mark in "।॥"))
+        hindi = detect_lang(text) == "hi"
+        text = (cut[:stop + 1] if stop > MAX_SPEAK_CHARS * 0.6 else cut)
+        # The cut may already end on a sentence mark; do not double it.
+        if text and text[-1] not in FULL_STOPS:
+            text += "।" if hindi else " …"
+        text += (" बाकी भाग "
+                 "टेक्स्ट में "
+                 "है।"
+                 if hindi else
+                 " That is the short version; the rest is in the text.")
     return text
 
 

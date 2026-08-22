@@ -778,7 +778,17 @@ $("vmode").onclick = () => {
   paintVmode();
 };
 
-async function say(text) {
+let SAYING = Promise.resolve();
+function say(text) {
+  // Serialised per answer. Two agents finish within moments of each other, and without
+  // this their sentences interleave in the queue — every other sentence from a different
+  // answer, which sounds exactly like words going missing.
+  if (!text) return SAYING;
+  SAYING = SAYING.then(() => sayNow(text)).catch(() => {});
+  return SAYING;
+}
+
+async function sayNow(text) {
   if (!text) return;
   // Streamed, one clip per sentence. Waiting for a whole answer to synthesise is several
   // seconds of silence; the first sentence takes well under one, and playback keeps ahead
@@ -812,12 +822,27 @@ async function say(text) {
 
 const SPEAKQ = [];
 let SPEAKING = false;
+
+/* Plays queued clips one after another.
+
+   Three things here are deliberate. A clip that fails to play must still advance the
+   queue, or one rejected play() — the autoplay policy rejects the first one often enough
+   — silently swallows the rest of the answer. The object URL is revoked once it has been
+   played, since a long answer is dozens of blobs. And `drainSpeech` is called again after
+   every outcome, success or failure, so the chain never stops halfway. */
 function drainSpeech() {
   if (SPEAKING || !SPEAKQ.length) return;
   SPEAKING = true;
-  const audio = new Audio(URL.createObjectURL(SPEAKQ.shift()));
-  audio.onended = audio.onerror = () => { SPEAKING = false; drainSpeech(); };
-  audio.play().catch(() => { SPEAKING = false; });
+  const url = URL.createObjectURL(SPEAKQ.shift());
+  const audio = new Audio(url);
+  const next = () => {
+    URL.revokeObjectURL(url);
+    SPEAKING = false;
+    drainSpeech();
+  };
+  audio.onended = next;
+  audio.onerror = next;
+  audio.play().catch(() => next());
 }
 
 $("results").addEventListener("click", async e => {
