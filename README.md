@@ -110,9 +110,9 @@ hostname.
 
 ## Voice
 
-Speak a task, hear the answer. Piper for speech and faster-whisper for listening, both
-local, both on CPU, ~8x and ~6x realtime respectively — no key, no API, nothing leaves the
-machine. Send a WhatsApp voice note and get one back; same on Discord; in the browser a 🎤
+Speak a task, hear the answer, **in English or Hindi**. Kokoro for speech (Apache-2.0, 54
+voices, sounds like a person) and faster-whisper for listening — both local, both on CPU,
+no key, no API, nothing leaves the machine. Devanagari picks the Hindi voice on its own. Send a WhatsApp voice note and get one back; same on Discord; in the browser a 🎤
 records and every answer has a 🔊.
 
 `/voice auto` (the default) speaks only when you spoke. Audio always accompanies the text

@@ -177,10 +177,34 @@ public internet only — this would be reading your own machine.
 Speak to it, and hear the answers. Both halves run locally on CPU — no key, no API,
 nothing leaves the machine, the same constraint the models follow.
 
-| | Engine | Size | Speed on this CPU |
-|---|---|---|---|
-| Speech | Piper (`en_US-lessac-medium`) | 63 MB | ~8x realtime |
-| Listening | faster-whisper (`base.en`, int8) | ~150 MB | ~6x realtime |
+| | Engine | Size | Speed on this CPU | Languages |
+|---|---|---|---|---|
+| Speech | **Kokoro** (Apache-2.0, 82M) | ~350 MB | ~4x realtime | 8, incl. **Hindi** |
+| Listening | faster-whisper `small`, int8 | ~460 MB | ~1x realtime | ~99 |
+
+Kokoro ships **54 voices** — `af_`/`am_` US English, `bf_`/`bm_` British, `hf_`/`hm_`
+Hindi — and sounds like a person rather than a speech synthesiser. Set them with
+`VOICE_KOKORO_EN` and `VOICE_KOKORO_HI`.
+
+Hindi works in both directions and needs no configuration: Devanagari in the answer picks
+the Hindi voice automatically, and a Hindi voice note transcribes to Devanagari.
+
+`VOICE_ENGINE=piper` switches to the lighter engine — a fifth the disk and twice the
+speed, but audibly synthetic and English-only unless you point `VOICE_PIPER_MODEL` at one
+of `hi_IN-pratham-medium`, `hi_IN-priyamvada-medium` or `hi_IN-rohan-medium`.
+
+### Both model choices were measured, not assumed
+
+`small` rather than `base` for listening, because on the same clips:
+
+| | `base` | `small` |
+|---|---|---|
+| English | *"for agents dispatched to ran locally to Ongemini"* | *"Four agents dispatched, two ran locally, two on Gemini."* |
+| Hindi | Urdu script (`نمسٹے مینی چار…`) | `नमस्ते मैने चार एजेंट भेजे हैं…` |
+
+Hindi and Urdu are close enough acoustically that only the script separates them, and
+`base` cannot tell them apart. `small` costs roughly 3x the time — about realtime here —
+which for a voice note is fine, since a fast wrong transcript is worth nothing.
 
 Models download on first use into `voices/` (gitignored) and are then kept in memory —
 reloading per utterance would cost more than speaking does.

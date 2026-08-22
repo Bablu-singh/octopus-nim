@@ -39,7 +39,7 @@ flowchart TB
         ROUTE["routing.py<br/><i>how heavy is this subtask?</i>"]
         AG["agents.py<br/><i>6 role templates, model preferences</i>"]
         WEB["web.py<br/><i>search · fetch · untrusted-content fencing</i>"]
-        VOX["voice.py<br/><i>Piper speech · Whisper ears · local, CPU</i>"]
+        VOX["voice.py<br/><i>Kokoro speech · Whisper ears<br/>en + hi · local, CPU</i>"]
     end
 
     subgraph transport["Provider layer"]
@@ -332,9 +332,13 @@ that would confirm something is listening.
 ## Voice
 
 `voice.py` is the same shape as everything else here: local, free, no key, and lazily
-loaded because most runs never use it. Piper synthesises about eight times faster than
-realtime on this CPU and faster-whisper transcribes about six times faster, so neither
-needs a GPU and neither is the slow part of a run.
+loaded because most runs never use it. It is also engine-pluggable in the same way
+`providers.py` is — Kokoro by default for a human-sounding voice and eight languages,
+Piper behind a flag for a fifth of the disk when English is all that is needed.
+
+Language is chosen by script rather than by a classifier: three Devanagari characters in
+an answer select the Hindi voice. Crude, and right for a two-way decision the alphabet
+already answers.
 
 Three decisions worth recording:
 
@@ -345,6 +349,11 @@ Three decisions worth recording:
   blocks are unlistenable, URLs are a minute of alphabet, asterisks are read aloud. Code
   and links are named rather than read, and long answers are cut on a sentence boundary
   with a note that the rest is in the text.
+- **Both model sizes were picked by measurement.** Whisper `base` returned Urdu script
+  for Hindi audio and misheard plain English; `small` got both right at roughly realtime.
+  A transcript that is wrong is worth nothing however fast it arrives — and Hindi and Urdu
+  are close enough acoustically that only the script separates them, so a Devanagari
+  speaker getting Nastaliq back is a silent failure rather than a visible one.
 - **'auto' is the default voice mode**, meaning it speaks only when spoken to. That is
   the rule conversations already follow, and it means voice costs nothing for people who
   type.

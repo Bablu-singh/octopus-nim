@@ -16,6 +16,7 @@ neonize>=0.4
 # Optional: voice in and out (ENABLE_VOICE=1). Both run locally on CPU - Piper is ~8x
 # realtime for speech, faster-whisper ~6x for transcription, no GPU and no API.
 # python-multipart is what lets the browser POST a recording.
+kokoro-onnx>=0.4
 piper-tts>=1.7
 faster-whisper>=1.1
 python-multipart>=0.0.9
