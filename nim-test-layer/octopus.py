@@ -329,7 +329,7 @@ async def _generate_image(key: str, model: str, prompt: str) -> dict:
 
 async def _run_agent(key: str | None, agent: dict, queue: asyncio.Queue,
                      sems: dict[str, asyncio.Semaphore], outputs: dict[str, str],
-                     ledger: "Ledger | None" = None) -> None:
+                     ledger: "Ledger | None" = None, lang_note: str = "") -> None:
     """Run one agent to completion, streaming as it goes.
 
     The model is passed in on the agent dict rather than read off the shared role template,
@@ -361,6 +361,11 @@ async def _run_agent(key: str | None, agent: dict, queue: asyncio.Queue,
         # other agent does too if its subtask names a URL, because a subtask that quotes
         # a link plainly wants that page read rather than guessed at.
         system, prompt = t.system, agent["subtask"]
+        # Taken from the original task, not from this subtask: a planner that translated
+        # the subtask into English has already destroyed the evidence, and this is the
+        # instruction that stops the answer coming back in English or romanised Hindi.
+        if lang_note:
+            system = t.system + "\n\n" + lang_note
         urls = web.URL_IN_TEXT.findall(agent["subtask"])
         if web.ENABLED and (role == "researcher" or urls):
             await queue.put(_event("searching", id=aid,
@@ -544,6 +549,8 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
     # request as evidence that *this* one is heavy, and a long enough history would push
     # every follow-up to a hosted model and skip the planner-skip saving entirely.
     task_weight, _ = routing.weigh(weigh_as or task, "analyst")
+    # Worked out once, from what the user actually wrote, and handed to every agent.
+    lang_note = agents.language_note(weigh_as or task)
 
     queue: asyncio.Queue = asyncio.Queue()
     sems = {"local": asyncio.Semaphore(LOCAL_PARALLEL)}
@@ -629,7 +636,7 @@ async def dispatch(key: str | None, task: str, roles: list[str] | None = None,
             spawned.append(agent)
             made.append(agent)
             workers.append(asyncio.create_task(
-                _run_agent(key, agent, queue, sems, outputs, ledger)))
+                _run_agent(key, agent, queue, sems, outputs, ledger, lang_note)))
         return made
 
     try:

@@ -349,6 +349,54 @@ def bind(model_ids: list[str], live: set[str] | None = None,
     return report
 
 
+# --- language ---------------------------------------------------------------
+# Nothing here used to mention language, and the result was predictable: the planner is
+# instructed in English and rewrites a Hindi task into English subtasks, so by the time an
+# agent sees the work the language has already been lost. What comes back is English, or
+# romanised Hindi — "Prem, jeevan ka sabse sundar upahaar hai" — which is nobody's
+# first choice.
+#
+# The script is the signal, as it is for routing and for choosing a voice.
+
+SCRIPTS: list[tuple[str, str, str]] = [
+    # (label for the prompt, native script name, character range)
+    ("Hindi", "Devanagari", r"[ऀ-ॿ]"),
+    ("Bengali", "Bengali", r"[ঀ-৿]"),
+    ("Tamil", "Tamil", r"[஀-௿]"),
+    ("Telugu", "Telugu", r"[ఀ-౿]"),
+    ("Gujarati", "Gujarati", r"[઀-૿]"),
+    ("Arabic or Urdu", "Arabic", r"[؀-ۿ]"),
+    ("Chinese", "Han", r"[一-鿿]"),
+    ("Russian", "Cyrillic", r"[Ѐ-ӿ]"),
+]
+
+
+def script_of(text: str) -> tuple[str, str] | None:
+    """(language, script) if the text is written in a non-Latin script, else None."""
+    for label, script, pattern in SCRIPTS:
+        if len(re.findall(pattern, text or "")) >= 3:
+            return label, script
+    return None
+
+
+def language_note(text: str) -> str:
+    """An instruction to answer in the language the request was written in.
+
+    Explicit about the script, because the usual failure is not answering in English —
+    it is answering in romanised Hindi, which a model will happily produce when it knows
+    the language but has been prompted entirely in English.
+    """
+    found = script_of(text)
+    if not found:
+        return ""
+    language, script = found
+    return (f"IMPORTANT: the request is written in {language}. Write your entire answer "
+            f"in {language} using {script} script. Do not answer in English. Do not "
+            f"transliterate into Latin letters — romanised text is not acceptable. "
+            f"Technical terms and proper nouns may stay in their original form where "
+            f"there is no natural equivalent.")
+
+
 # --- planning ---------------------------------------------------------------
 
 ROLE_MENU = ("writer (prose), coder (code), scheduler (dated plans), "
