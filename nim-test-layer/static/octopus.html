@@ -63,13 +63,18 @@
   .stars circle:nth-child(4){animation-delay:3.1s}
   @keyframes twinkle{0%,100%{opacity:.25}50%{opacity:.9}}
   @keyframes glow{0%,100%{opacity:.5}50%{opacity:.8}}
+  .clock .hand-m{transform-origin:0 0;animation:spin 12s linear infinite}
+  .clock .hand-h{transform-origin:0 0;animation:spin 144s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
   .plant path{transform-origin:bottom center;animation:sway 7s ease-in-out infinite}
   @keyframes sway{0%,100%{transform:rotate(-2deg)}50%{transform:rotate(2deg)}}
 
   /* a desk appears only when someone is using it */
-  .desk .top{fill:#123c4e;stroke:#1b5064;stroke-width:1}
-  .desk .leg{fill:#0e3243}
-  .desk .mon{fill:#04161d;stroke:#1b5064;stroke-width:1}
+  .desk .top{fill:#8d6640;stroke:#a87c4f;stroke-width:1}
+  .desk .leg{fill:#5a4232}
+  .desk .mon{fill:#0b1e28;stroke:#3f6b80;stroke-width:1}
+  .desk .mug{fill:#ff9b8f}
+  .desk .paper{fill:#eae2d0;opacity:.85}
   .desk .glare{fill:currentColor;opacity:0}
   .desk.busy .glare{opacity:.5;animation:flicker 1.6s ease-in-out infinite}
   .desk.done .glare{opacity:.22}
@@ -80,7 +85,9 @@
   .person{transition:transform 1.15s cubic-bezier(.34,.8,.36,1)}
   .person .shadow{fill:#04141d;opacity:.45}
   .person .torso{fill:currentColor}
-  .person .head{fill:#f4e0c8}
+  .person .head{fill:#f0c9a0}
+  .person .hair{fill:#3a2a24}
+  .person .chair{fill:#2b5f75;stroke:#3f819c;stroke-width:1}
   .person .arm2{stroke:currentColor;stroke-width:2.4;stroke-linecap:round}
   .person.busy .torso{animation:type 1.1s ease-in-out infinite}
   @keyframes type{0%,100%{transform:translateY(0)}50%{transform:translateY(-1.1px)}}
@@ -262,10 +269,10 @@
          aria-label="Agents at work in the studio, one person per running agent">
       <defs>
         <linearGradient id="floorg" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#0d2f3d"/><stop offset="100%" stop-color="#071e28"/>
+          <stop offset="0%" stop-color="#3a2a20"/><stop offset="100%" stop-color="#241a14"/>
         </linearGradient>
         <linearGradient id="wallg" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#0a2836"/><stop offset="100%" stop-color="#0c3040"/>
+          <stop offset="0%" stop-color="#123246"/><stop offset="100%" stop-color="#17415a"/>
         </linearGradient>
         <radialGradient id="lamp" cx="50%" cy="0%">
           <stop offset="0%" stop-color="#7ff2e0" stop-opacity=".22"/>
@@ -276,7 +283,15 @@
       <!-- room -->
       <rect x="18" y="10" width="584" height="86" fill="url(#wallg)" rx="6"/>
       <rect x="18" y="94" width="584" height="224" fill="url(#floorg)" rx="6"/>
-      <line x1="18" y1="94" x2="602" y2="94" stroke="#164457" stroke-width="1.5"/>
+      <line x1="18" y1="94" x2="602" y2="94" stroke="#5a4232" stroke-width="2"/>
+      <g stroke="#2e211a" stroke-width="1" opacity=".55">
+        <line x1="18" y1="150" x2="602" y2="150"/>
+        <line x1="18" y1="206" x2="602" y2="206"/>
+        <line x1="18" y1="262" x2="602" y2="262"/>
+      </g>
+      <rect x="96" y="112" width="452" height="176" rx="10" fill="#7c3b52" opacity=".22"/>
+      <rect x="108" y="122" width="428" height="156" rx="8" fill="none"
+            stroke="#c9788f" stroke-width="1" opacity=".3"/>
 
       <!-- night window, because this thing mostly runs late -->
       <g class="window">
@@ -293,9 +308,27 @@
 
       <!-- door: everyone arrives through here -->
       <g class="door">
-        <rect x="34" y="30" width="46" height="64" rx="3" fill="#0a2430" stroke="#1b5064"/>
-        <circle cx="72" cy="64" r="2.2" fill="#7ff2e0" opacity=".7"/>
+        <rect x="34" y="30" width="46" height="64" rx="3" fill="#6b4a2f" stroke="#8d6640"/>
+        <rect x="38" y="36" width="38" height="24" rx="2" fill="#2a4a5c" opacity=".7"/>
+        <circle cx="72" cy="64" r="2.6" fill="#ffd166"/>
         <text x="57" y="22" class="sign" text-anchor="middle">IN</text>
+      </g>
+
+      <!-- clock and pinboard: a wall with nothing on it reads as a placeholder -->
+      <g class="clock" transform="translate(180,52)">
+        <circle r="13" fill="#0d2b38" stroke="#c9788f" stroke-width="1.5"/>
+        <line class="hand-h" x1="0" y1="0" x2="0" y2="-6" stroke="#ffd166" stroke-width="1.6"
+              stroke-linecap="round"/>
+        <line class="hand-m" x1="0" y1="0" x2="0" y2="-9.5" stroke="#eafffb" stroke-width="1.2"
+              stroke-linecap="round"/>
+      </g>
+      <g class="board" transform="translate(240,32)">
+        <rect width="86" height="46" rx="3" fill="#6b4a2f" stroke="#8d6640"/>
+        <rect x="7" y="7" width="22" height="16" rx="1" fill="#ffd166" opacity=".85"/>
+        <rect x="34" y="7" width="22" height="16" rx="1" fill="#7fd1ae" opacity=".85"/>
+        <rect x="61" y="7" width="18" height="16" rx="1" fill="#c9788f" opacity=".85"/>
+        <rect x="7" y="28" width="30" height="11" rx="1" fill="#8ab4f8" opacity=".8"/>
+        <rect x="42" y="28" width="37" height="11" rx="1" fill="#ff9b8f" opacity=".7"/>
       </g>
 
       <!-- a couple of plants, purely so it looks like somewhere -->
@@ -337,6 +370,11 @@
 
 <script>
 const API = location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+
+// Every agent currently on screen, keyed by run-id + agent-id so two concurrent
+// tangles cannot collide. This is the single source the studio is drawn from.
+const A = new Map();
+let started = 0, timer = null, waves = 0;
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const ROLES = ["writer","coder","scheduler","imager","analyst"];
@@ -387,7 +425,10 @@ function drawDesk(id, seat, colour) {
     `<rect class="leg" x="-26" y="14" width="4" height="14"/>` +
     `<rect class="leg" x="22" y="14" width="4" height="14"/>` +
     `<rect class="mon" x="-13" y="-14" width="26" height="19" rx="2"/>` +
-    `<rect class="glare" x="-11" y="-12" width="22" height="15" rx="1"/>`;
+    `<rect class="glare" x="-11" y="-12" width="22" height="15" rx="1"/>` +
+    // props, so a desk reads as somebody's desk rather than a rectangle
+    `<rect class="paper" x="16" y="2" width="11" height="5" rx="1"/>` +
+    `<rect class="mug" x="-27" y="-1" width="6" height="7" rx="1.5"/>`;
   $("desks").appendChild(g);
   return g;
 }
@@ -402,10 +443,12 @@ function drawPerson(id, colour) {
   g.innerHTML =
     `<ellipse class="pool" cx="0" cy="4" rx="34" ry="16"/>` +
     `<ellipse class="shadow" cx="0" cy="20" rx="11" ry="3.5"/>` +
+    `<rect class="chair" x="-9" y="6" width="18" height="13" rx="4"/>` +
     `<path class="arm2" d="M-6 8 L-11 15"/>` +
     `<path class="arm2" d="M6 8 L11 15"/>` +
     `<rect class="torso" x="-7" y="2" width="14" height="17" rx="6"/>` +
     `<circle class="head" cx="0" cy="-4" r="6"/>` +
+    `<path class="hair" d="M-6 -5 A6 6 0 0 1 6 -5 L6 -7 A6 6 0 0 0 -6 -7 Z"/>` +
     `<text class="mark" x="13" y="-6"></text>` +
     `<text class="tag" x="0" y="34" text-anchor="middle"></text>` +
     `<text class="prov2" x="0" y="43" text-anchor="middle"></text>`;
